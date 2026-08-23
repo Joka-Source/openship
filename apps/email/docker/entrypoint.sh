@@ -142,6 +142,12 @@ if [ -n "$FIRST_DOMAIN" ]; then
   esac
 fi
 
+# Reapply the public certificate on every boot. The iRedMail paths live inside
+# the image rather than on a persistent mount, so a container replacement would
+# otherwise resurrect the baked self-signed certificate even though certbot's
+# valid lineage remains mounted at /etc/letsencrypt.
+/opt/openship-mail/configure-mail-tls.sh
+
 # 3. bootstrap the mail databases (idempotent; skips if the vmail schema exists).
 #
 # The wait for the sidecar lives INSIDE db-bootstrap.sh, which polls `SELECT 1` until
