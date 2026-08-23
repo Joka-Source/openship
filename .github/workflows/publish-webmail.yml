@@ -113,3 +113,12 @@ jobs:
             echo "- Digest: \`$IMAGE_DIGEST\`"
             echo "- Immutable ref: \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME@$IMAGE_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish package for anonymous production pulls
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ matrix.image }}
+        run: >-
+          gh api --method PATCH
+          "/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/openship-$IMAGE_NAME"
+          -f visibility=public
