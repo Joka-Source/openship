@@ -202,6 +202,46 @@ jobs:
           refs=()
           declared_platforms=()
           expected_descriptors=()
+          source_index_policy='
+            .mediaType == "application/vnd.oci.image.index.v1+json" and
+            (.manifests | type == "array") and
+            (
+              .manifests as $manifests |
+              [
+                $manifests[] |
+                select(
+                  .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+                  (.platform.os + "/" + .platform.architecture) == $platform and
+                  (.digest | test("^sha256:[0-9a-f]{64}$"))
+                )
+              ] as $runnable |
+              (($runnable | length) == 1) and
+              (
+                [
+                  $manifests[] |
+                  select(
+                    (
+                      (
+                        .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+                        .digest == $runnable[0].digest and
+                        (.platform.os + "/" + .platform.architecture) == $platform
+                      ) or
+                      (
+                        .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+                        (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                        .platform.os == "unknown" and
+                        .platform.architecture == "unknown" and
+                        .annotations["vnd.docker.reference.type"] == "attestation-manifest" and
+                        .annotations["vnd.docker.reference.digest"] == $runnable[0].digest
+                      )
+                    ) |
+                    not
+                  )
+                ] |
+                length == 0
+              )
+            )
+          '
           for receipt in "${receipts[@]}"; do
             jq -e \
               --arg image "$IMAGE_NAME" \
@@ -211,9 +251,12 @@ jobs:
             digest=$(jq -r .digest "$receipt")
             platform=$(jq -r .platform "$receipt")
 
+            source_raw=$(docker buildx imagetools inspect "$repository@$digest" --raw)
+            jq -e --arg platform "$platform" "$source_index_policy" <<< "$source_raw" >/dev/null
+
             image_json=$(
               docker buildx imagetools inspect \
-                --format "{{json (index .Image \"$platform\")}}" \
+                --format "{{json .Image}}" \
                 "$repository@$digest"
             )
             jq -e \
@@ -222,14 +265,9 @@ jobs:
               '(.os + "/" + .architecture) == $platform and .config.Labels["org.opencontainers.image.revision"] == $source_sha' \
               <<< "$image_json" >/dev/null
 
-            source_raw=$(docker buildx imagetools inspect "$repository@$digest" --raw)
-            if jq -e '.manifests | type == "array"' <<< "$source_raw" >/dev/null; then
-              mapfile -t source_descriptors < <(jq -r '.manifests[].digest' <<< "$source_raw")
-              test "${#source_descriptors[@]}" -gt 0
-              expected_descriptors+=("${source_descriptors[@]}")
-            else
-              expected_descriptors+=("$digest")
-            fi
+            mapfile -t source_descriptors < <(jq -r '.manifests[].digest' <<< "$source_raw")
+            test "${#source_descriptors[@]}" -gt 0
+            expected_descriptors+=("${source_descriptors[@]}")
 
             refs+=("$repository@$digest")
             declared_platforms+=("$platform")

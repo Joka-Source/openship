@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
@@ -6,6 +7,21 @@ const workflow = readFileSync(
   new URL("../.github/workflows/publish-webmail.yml", import.meta.url),
   "utf8",
 );
+
+function sourceIndexPolicy() {
+  const match = workflow.match(/source_index_policy='\n([\s\S]*?)\n\s+'/);
+  assert.ok(match, "missing source index policy");
+  return match[1];
+}
+
+function sourceIndexAccepted(index, platform = "linux/amd64") {
+  return (
+    spawnSync("jq", ["-e", "--arg", "platform", platform, sourceIndexPolicy()], {
+      input: JSON.stringify(index),
+      encoding: "utf8",
+    }).status === 0
+  );
+}
 
 test("mail publisher uses native architecture runners and assembles one immutable index", () => {
   assert.match(workflow, /runner: ubuntu-24\.04\n\s+platform: linux\/amd64\n\s+arch: amd64/);
@@ -20,6 +36,8 @@ test("mail publisher uses native architecture runners and assembles one immutabl
   assert.doesNotMatch(workflow, /name=ghcr\.io\/\$\{\{ github\.repository_owner \}\}/);
   assert.match(workflow, /push-by-digest=true,name-canonical=true,push=true/);
   assert.match(workflow, /steps\.build\.outputs\.digest/);
+  assert.match(workflow, /--format "\{\{json \.Image\}\}"/);
+  assert.doesNotMatch(workflow, /index \.Image/);
   assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(workflow, /actions\/download-artifact@[0-9a-f]{40}/);
   assert.match(workflow, /vnd\.docker\.reference\.type/);
@@ -49,4 +67,34 @@ test("every package-writing job retains the founder, main, and protected-environ
     assert.match(body, /github\.triggering_actor == 'TrueKrishna'/);
     assert.match(body, /environment: webmail-publish/);
   }
+});
+
+test("source index policy rejects duplicate runnable manifests", () => {
+  const runnable = {
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    digest: `sha256:${"a".repeat(64)}`,
+    platform: { os: "linux", architecture: "amd64" },
+  };
+  const attestation = {
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    digest: `sha256:${"b".repeat(64)}`,
+    platform: { os: "unknown", architecture: "unknown" },
+    annotations: {
+      "vnd.docker.reference.digest": runnable.digest,
+      "vnd.docker.reference.type": "attestation-manifest",
+    },
+  };
+  const valid = {
+    mediaType: "application/vnd.oci.image.index.v1+json",
+    manifests: [runnable, attestation],
+  };
+
+  assert.equal(sourceIndexAccepted(valid), true);
+  assert.equal(
+    sourceIndexAccepted({
+      ...valid,
+      manifests: [runnable, { ...runnable, digest: `sha256:${"c".repeat(64)}` }, attestation],
+    }),
+    false,
+  );
 });
