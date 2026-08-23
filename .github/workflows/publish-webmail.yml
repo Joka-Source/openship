@@ -1,8 +1,8 @@
 name: Publish mail images
 
-# Bootstrap publisher for reviewed webmail commits that are not yet on the
-# default branch. The workflow itself remains default-branch controlled; the
-# selected commit is used only as the Docker build context.
+# Default-branch-controlled publisher for an exact reviewed source revision.
+# Native runners build one architecture each; a separate guarded job publishes
+# the final multi-architecture index only after every platform build succeeds.
 on:
   workflow_dispatch:
     inputs:
@@ -20,15 +20,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Build and publish ${{ matrix.image }} image
+  build-platform:
+    name: Build ${{ matrix.image }} for ${{ matrix.platform }}
     if: >-
       github.ref == 'refs/heads/main' &&
       github.event.repository.full_name == 'Joka-Source/openship' &&
       github.actor == 'TrueKrishna' &&
       github.actor_id == '94633662' &&
       github.triggering_actor == 'TrueKrishna'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     environment: webmail-publish
     strategy:
@@ -37,8 +37,24 @@ jobs:
         include:
           - image: mail
             dockerfile: apps/email/Dockerfile
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - image: mail
+            dockerfile: apps/email/Dockerfile
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
           - image: webmail
             dockerfile: apps/email/Dockerfile.webmail
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - image: webmail
+            dockerfile: apps/email/Dockerfile.webmail
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
     steps:
       - name: Validate requested revision
         env:
@@ -57,13 +73,18 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify exact checkout
+      - name: Verify exact checkout and native runner architecture
         env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          actual_arch=$(uname -m)
+          case "$EXPECTED_ARCH:$actual_arch" in
+            amd64:x86_64|arm64:aarch64) ;;
+            *) echo "runner architecture mismatch" >&2; exit 1 ;;
+          esac
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -75,41 +96,186 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive provenance tag
-        id: image
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          IMAGE_NAME: ${{ matrix.image }}
-        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME:jtyid-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
+      - name: Build and push native platform by digest
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.image.outputs.ref }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/openship-${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ inputs.source_sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=openship-${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=openship-${{ matrix.image }}
+          cache-from: type=gha,scope=openship-${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=openship-${{ matrix.image }}-${{ matrix.arch }}
 
-      - name: Record immutable receipt
+      - name: Export immutable build receipt
         env:
-          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          ARCH: ${{ matrix.arch }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ matrix.image }}
+          PLATFORM: ${{ matrix.platform }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p /tmp/digests
+          jq -n \
+            --arg digest "$IMAGE_DIGEST" \
+            --arg image "$IMAGE_NAME" \
+            --arg platform "$PLATFORM" \
+            --arg source_sha "$SOURCE_SHA" \
+            '{digest: $digest, image: $image, platform: $platform, source_sha: $source_sha}' \
+            > "/tmp/digests/$ARCH.json"
+
+      - name: Upload immutable build receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-index:
+    name: Publish ${{ matrix.image }} multi-architecture index
+    needs: build-platform
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.full_name == 'Joka-Source/openship' &&
+      github.actor == 'TrueKrishna' &&
+      github.actor_id == '94633662' &&
+      github.triggering_actor == 'TrueKrishna'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: webmail-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [mail, webmail]
+    steps:
+      - name: Validate requested revision
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "source_sha must be an exact lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+
+      - name: Download immutable build receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble, verify, and record immutable index
+        env:
           IMAGE_NAME: ${{ matrix.image }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          test -n "$IMAGE_DIGEST"
+          shopt -s nullglob
+          receipts=(/tmp/digests/*.json)
+          test "${#receipts[@]}" -eq 2
+
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME"
+          base="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME:jtyid-$SOURCE_SHA"
+          refs=()
+          declared_platforms=()
+          expected_descriptors=()
+          for receipt in "${receipts[@]}"; do
+            jq -e \
+              --arg image "$IMAGE_NAME" \
+              --arg source_sha "$SOURCE_SHA" \
+              '.image == $image and .source_sha == $source_sha and (.platform == "linux/amd64" or .platform == "linux/arm64") and (.digest | test("^sha256:[0-9a-f]{64}$"))' \
+              "$receipt" >/dev/null
+            digest=$(jq -r .digest "$receipt")
+            platform=$(jq -r .platform "$receipt")
+
+            image_json=$(
+              docker buildx imagetools inspect \
+                --format "{{json (index .Image \"$platform\")}}" \
+                "$repository@$digest"
+            )
+            jq -e \
+              --arg platform "$platform" \
+              --arg source_sha "$SOURCE_SHA" \
+              '(.os + "/" + .architecture) == $platform and .config.Labels["org.opencontainers.image.revision"] == $source_sha' \
+              <<< "$image_json" >/dev/null
+
+            source_raw=$(docker buildx imagetools inspect "$repository@$digest" --raw)
+            if jq -e '.manifests | type == "array"' <<< "$source_raw" >/dev/null; then
+              mapfile -t source_descriptors < <(jq -r '.manifests[].digest' <<< "$source_raw")
+              test "${#source_descriptors[@]}" -gt 0
+              expected_descriptors+=("${source_descriptors[@]}")
+            else
+              expected_descriptors+=("$digest")
+            fi
+
+            refs+=("$repository@$digest")
+            declared_platforms+=("$platform")
+          done
+          declared=$(printf '%s\n' "${declared_platforms[@]}" | sort -u)
+          test "$declared" = $'linux/amd64\nlinux/arm64'
+
+          expected_raw=$(docker buildx imagetools create --dry-run -t "$base" "${refs[@]}")
+          expected_image_digest="sha256:$(printf '%s' "$expected_raw" | sha256sum | awk '{print $1}')"
+          [[ "$expected_image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools create -t "$base" "${refs[@]}"
+
+          inspection=$(docker buildx imagetools inspect "$base")
+          image_digest=$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" {print $2; exit}')
+          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$image_digest" = "$expected_image_digest"
+          immutable_index="$repository@$image_digest"
+
+          raw=$(docker buildx imagetools inspect "$immutable_index" --raw)
+          expected=$(printf '%s\n' "${expected_descriptors[@]}" | sort)
+          actual_descriptors=$(jq -r '.manifests[]?.digest' <<< "$raw" | sort)
+          test -n "$expected"
+          test "$actual_descriptors" = "$expected"
+          jq -e '
+            [
+              .manifests[]? |
+              select(
+                (
+                  (.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) or
+                  (
+                    .platform.os == "unknown" and
+                    .platform.architecture == "unknown" and
+                    .annotations["vnd.docker.reference.type"] == "attestation-manifest"
+                  )
+                ) |
+                not
+              )
+            ] |
+            length == 0
+          ' <<< "$raw" >/dev/null
+          platforms=$(
+            printf '%s' "$raw" |
+              jq -r '.manifests[]? | select(.platform.os == "linux") | "\(.platform.os)/\(.platform.architecture)"' |
+              sort -u
+          )
+          test "$platforms" = $'linux/amd64\nlinux/arm64'
+
           {
             echo "### OpenShip $IMAGE_NAME image"
             echo "- Source: \`$SOURCE_SHA\`"
-            echo "- Provenance tag: \`$IMAGE_REF\`"
-            echo "- Digest: \`$IMAGE_DIGEST\`"
-            echo "- Immutable ref: \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME@$IMAGE_DIGEST\`"
+            echo "- Provenance tag: \`$base\`"
+            echo "- Digest: \`$image_digest\`"
+            echo "- Immutable ref: \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME@$image_digest\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
           } >> "$GITHUB_STEP_SUMMARY"
