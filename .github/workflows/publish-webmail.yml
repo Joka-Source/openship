@@ -1,0 +1,105 @@
+name: Publish webmail image
+
+# Bootstrap publisher for reviewed webmail commits that are not yet on the
+# default branch. The workflow itself remains default-branch controlled; the
+# selected commit is used only as the Docker build context.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit SHA to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-webmail-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish immutable webmail image
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.full_name == 'Joka-Source/openship' &&
+      github.actor == 'TrueKrishna' &&
+      github.actor_id == '94633662' &&
+      github.triggering_actor == 'TrueKrishna'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: webmail-publish
+    steps:
+      - name: Validate requested revision
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "source_sha must be an exact lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+
+      - name: Checkout exact revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact checkout
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive provenance tag
+        id: image
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-webmail:jtyid-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: apps/email/Dockerfile.webmail
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.ref }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=openship-webmail
+          cache-to: type=gha,mode=max,scope=openship-webmail
+
+      - name: Record immutable receipt
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$IMAGE_DIGEST"
+          {
+            echo "### Webmail image"
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Provenance tag: \`$IMAGE_REF\`"
+            echo "- Digest: \`$IMAGE_DIGEST\`"
+            echo "- Immutable ref: \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-webmail@$IMAGE_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
