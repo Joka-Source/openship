@@ -35,6 +35,19 @@ export const session = sqliteTable(
     /** AES-GCM-encrypted IMAP password. Decrypted per request to open
      *  IMAP connections. Never stored in plaintext. */
     encryptedPassword: blob('encrypted_password', { mode: 'buffer' }).notNull(),
+    /** Authentication mode is additive so legacy password rows remain valid. */
+    authMode: text('auth_mode', { enum: ['password', 'jtyid'] })
+      .notNull()
+      .default('password'),
+    /** Immutable OIDC identity. Null for password sessions. */
+    jtyid: text('jtyid'),
+    providerSubject: text('provider_subject'),
+    /** Original signed OIDC auth_time. Refresh never advances this boundary. */
+    authenticatedAt: integer('authenticated_at', { mode: 'timestamp' }),
+    /** OAuth credentials use the same AES-GCM envelope as passwords. */
+    encryptedAccessToken: blob('encrypted_access_token', { mode: 'buffer' }),
+    encryptedRefreshToken: blob('encrypted_refresh_token', { mode: 'buffer' }),
+    accessTokenExpiresAt: integer('access_token_expires_at', { mode: 'timestamp' }),
     /** IMAP host / port - derived from email domain at sign-in unless
      *  the env var overrides. Stored so we don't re-derive per request. */
     imapHost: text('imap_host').notNull(),
@@ -46,10 +59,7 @@ export const session = sqliteTable(
     /** Unix-seconds epoch - when the session must be re-validated. */
     expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
   },
-  (t) => [
-    index('idx_session_email').on(t.email),
-    index('idx_session_expires_at').on(t.expiresAt),
-  ],
+  (t) => [index('idx_session_email').on(t.email), index('idx_session_expires_at').on(t.expiresAt)],
 );
 
 export const userSettings = sqliteTable('user_settings', {

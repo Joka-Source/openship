@@ -34,13 +34,17 @@ export function buildContext(
       host: session.imapHost,
       port: session.imapPort,
       user: session.email,
-      pass: session.password,
+      ...(session.authMode === 'jtyid'
+        ? { accessToken: session.accessToken! }
+        : { pass: session.password! }),
     },
     smtp: {
       host: session.smtpHost,
       port: session.smtpPort,
       user: session.email,
-      pass: session.password,
+      ...(session.authMode === 'jtyid'
+        ? { accessToken: session.accessToken! }
+        : { pass: session.password! }),
     },
     hono,
   };

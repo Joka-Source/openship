@@ -8,8 +8,8 @@
  * apps/email/server/src/lib/schemas.ts for the trust rationale.
  */
 
-import { useState } from 'react';
-import { Eye, EyeOff, Loader2, Lock, Mail } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Eye, EyeOff, KeyRound, Loader2, Lock, Mail } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { signIn } from '@/lib/auth-client';
@@ -63,6 +63,17 @@ export function LoginClient() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [jtyidEnabled, setJtyidEnabled] = useState(false);
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('error') === 'jtyid') {
+      toast.error('JTYID sign-in failed');
+    }
+    void fetch('/auth/methods', { credentials: 'include' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((methods: { jtyid?: unknown } | null) => setJtyidEnabled(methods?.jtyid === true))
+      .catch(() => setJtyidEnabled(false));
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -120,91 +131,103 @@ export function LoginClient() {
           </div>
 
           {/* Card - extra rounded, soft glass over the gradient blobs. */}
-          <form
-            onSubmit={onSubmit}
-            className="rounded-[28px] border border-black/[0.07] bg-white/75 p-8 shadow-[0_24px_56px_-20px_rgba(0,0,0,0.12),0_2px_4px_-2px_rgba(0,0,0,0.05)] backdrop-blur-2xl dark:border-white/[0.08] dark:bg-[#141414]/75 dark:shadow-[0_24px_56px_-20px_rgba(0,0,0,0.6)]"
-          >
-            <div className="space-y-5">
-              <div className="space-y-2">
-                <Label
-                  htmlFor="email"
-                  className="text-[13px] font-medium text-foreground/85"
-                >
-                  Email
-                </Label>
-                <div className="relative">
-                  <Mail
-                    aria-hidden
-                    className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-muted-foreground/60"
-                  />
-                  <Input
-                    id="email"
-                    type="email"
-                    autoComplete="email"
-                    required
-                    autoFocus
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    className="h-12 rounded-2xl border-black/[0.08] bg-white/80 pl-11 pr-4 text-[15px] transition-colors focus-visible:border-foreground/20 focus-visible:bg-white focus-visible:ring-1 focus-visible:ring-foreground/10 dark:border-white/[0.08] dark:bg-black/30 dark:focus-visible:border-white/20 dark:focus-visible:bg-black/50"
-                  />
+          <div className="rounded-[28px] border border-black/[0.07] bg-white/75 p-8 shadow-[0_24px_56px_-20px_rgba(0,0,0,0.12),0_2px_4px_-2px_rgba(0,0,0,0.05)] backdrop-blur-2xl dark:border-white/[0.08] dark:bg-[#141414]/75 dark:shadow-[0_24px_56px_-20px_rgba(0,0,0,0.6)]">
+            {jtyidEnabled && (
+              <>
+                <Button asChild className="h-12 w-full rounded-2xl text-[15px] font-medium">
+                  <a href="/auth/jtyid?returnTo=%2Fmail%2Finbox">
+                    <KeyRound className="h-4 w-4" />
+                    Continue with JTYID
+                  </a>
+                </Button>
+
+                <div className="my-6 flex items-center gap-3" aria-hidden>
+                  <div className="h-px flex-1 bg-border" />
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    or use mailbox password
+                  </span>
+                  <div className="h-px flex-1 bg-border" />
+                </div>
+              </>
+            )}
+
+            <form onSubmit={onSubmit}>
+              <div className="space-y-5">
+                <div className="space-y-2">
+                  <Label htmlFor="email" className="text-[13px] font-medium text-foreground/85">
+                    Email
+                  </Label>
+                  <div className="relative">
+                    <Mail
+                      aria-hidden
+                      className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-muted-foreground/60"
+                    />
+                    <Input
+                      id="email"
+                      type="email"
+                      autoComplete="email"
+                      required
+                      autoFocus
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      className="h-12 rounded-2xl border-black/[0.08] bg-white/80 pl-11 pr-4 text-[15px] transition-colors focus-visible:border-foreground/20 focus-visible:bg-white focus-visible:ring-1 focus-visible:ring-foreground/10 dark:border-white/[0.08] dark:bg-black/30 dark:focus-visible:border-white/20 dark:focus-visible:bg-black/50"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="password" className="text-[13px] font-medium text-foreground/85">
+                    Password
+                  </Label>
+                  <div className="relative">
+                    <Lock
+                      aria-hidden
+                      className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-muted-foreground/60"
+                    />
+                    <Input
+                      id="password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Enter your password"
+                      className="h-12 rounded-2xl border-black/[0.08] bg-white/80 pl-11 pr-12 text-[15px] transition-colors focus-visible:border-foreground/20 focus-visible:bg-white focus-visible:ring-1 focus-visible:ring-foreground/10 dark:border-white/[0.08] dark:bg-black/30 dark:focus-visible:border-white/20 dark:focus-visible:bg-black/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      tabIndex={-1}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-muted-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="h-[18px] w-[18px]" />
+                      ) : (
+                        <Eye className="h-[18px] w-[18px]" />
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label
-                  htmlFor="password"
-                  className="text-[13px] font-medium text-foreground/85"
-                >
-                  Password
-                </Label>
-                <div className="relative">
-                  <Lock
-                    aria-hidden
-                    className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-muted-foreground/60"
-                  />
-                  <Input
-                    id="password"
-                    type={showPassword ? 'text' : 'password'}
-                    autoComplete="current-password"
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter your password"
-                    className="h-12 rounded-2xl border-black/[0.08] bg-white/80 pl-11 pr-12 text-[15px] transition-colors focus-visible:border-foreground/20 focus-visible:bg-white focus-visible:ring-1 focus-visible:ring-foreground/10 dark:border-white/[0.08] dark:bg-black/30 dark:focus-visible:border-white/20 dark:focus-visible:bg-black/50"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? 'Hide password' : 'Show password'}
-                    tabIndex={-1}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-muted-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
-                  >
-                    {showPassword ? (
-                      <EyeOff className="h-[18px] w-[18px]" />
-                    ) : (
-                      <Eye className="h-[18px] w-[18px]" />
-                    )}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <Button
-              type="submit"
-              disabled={submitting}
-              className="mt-6 h-12 w-full rounded-2xl bg-foreground text-[15px] font-medium text-background shadow-[0_2px_10px_-2px_rgba(0,0,0,0.2)] transition-all hover:bg-foreground/90 disabled:opacity-60"
-            >
-              {submitting ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Signing in
-                </>
-              ) : (
-                'Sign in'
-              )}
-            </Button>
-          </form>
+              <Button
+                type="submit"
+                disabled={submitting}
+                className="mt-6 h-12 w-full rounded-2xl bg-foreground text-[15px] font-medium text-background shadow-[0_2px_10px_-2px_rgba(0,0,0,0.2)] transition-all hover:bg-foreground/90 disabled:opacity-60"
+              >
+                {submitting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Signing in
+                  </>
+                ) : (
+                  'Sign in'
+                )}
+              </Button>
+            </form>
+          </div>
 
           <p className="mt-7 text-center text-[13px] leading-relaxed text-muted-foreground">
             {footer}

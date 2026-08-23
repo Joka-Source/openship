@@ -20,7 +20,6 @@ import { dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
 import { getCookie } from 'hono/cookie';
 import { secureHeaders } from 'hono/secure-headers';
 import { bodyLimit } from 'hono/body-limit';
@@ -35,10 +34,18 @@ import { getSession } from './lib/session';
 import { getBranding, assetsDir } from './lib/branding';
 import { renderIndexHtml } from './lib/index-html';
 import { brandingAdminRoute } from './routes/branding-admin';
+import { safeRequestLogPath } from './lib/request-log';
 
 const app = new Hono();
 
-app.use('*', logger());
+app.use('*', async (c, next) => {
+  const method = c.req.method;
+  const path = safeRequestLogPath(c.req.url);
+  const startedAt = Date.now();
+  console.log(`<-- ${method} ${path}`);
+  await next();
+  console.log(`--> ${method} ${path} ${c.res.status} ${Date.now() - startedAt}ms`);
+});
 
 // Defense-in-depth HTTP response headers. We're primarily an API server,
 // so we deliberately leave CSP unset (the only HTML we ever return is

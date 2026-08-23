@@ -16,7 +16,20 @@ export interface ImapAuth {
   host: string;
   port: number;
   user: string;
-  pass: string;
+  pass?: string;
+  accessToken?: string;
+}
+
+export function imapClientOptions(auth: ImapAuth): ConstructorParameters<typeof ImapFlow>[0] {
+  return {
+    host: auth.host,
+    port: auth.port,
+    secure: auth.port === 993,
+    auth: auth.accessToken
+      ? { user: auth.user, accessToken: auth.accessToken }
+      : { user: auth.user, pass: auth.pass ?? '' },
+    logger: false,
+  };
 }
 
 /**
@@ -84,11 +97,7 @@ export async function withImap<T>(
   const label = options.label ?? 'imap';
   const startedAt = performance.now();
   const client = new ImapFlow({
-    host: auth.host,
-    port: auth.port,
-    secure: auth.port === 993,
-    auth: { user: auth.user, pass: auth.pass },
-    logger: false,
+    ...imapClientOptions(auth),
     // socketTimeout is imapflow's idle-socket guard. Setting it to the
     // operation budget gives the wire layer the same ceiling as the
     // logical operation - a stuck socket bails out at the same point
@@ -145,7 +154,9 @@ export async function withImap<T>(
       } catch {
         /* socket already dead, ignore */
       }
-      imapDebug(`${label}: torn down forcibly`, { total: Math.round(performance.now() - startedAt) });
+      imapDebug(`${label}: torn down forcibly`, {
+        total: Math.round(performance.now() - startedAt),
+      });
     } else {
       // Happy path - graceful LOGOUT, but with its own short race so a
       // misbehaving server can't block successful responses either.
@@ -171,7 +182,9 @@ export async function withImap<T>(
       } catch {
         /* already closed by logout */
       }
-      imapDebug(`${label}: torn down cleanly`, { total: Math.round(performance.now() - startedAt) });
+      imapDebug(`${label}: torn down cleanly`, {
+        total: Math.round(performance.now() - startedAt),
+      });
     }
   }
 }

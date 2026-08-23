@@ -22,12 +22,24 @@ import { setCookie, deleteCookie, getCookie } from 'hono/cookie';
 import { env } from '../env';
 import { signInSchema } from '../lib/schemas';
 import { probeImap } from '../lib/imap';
-import { createSession, deleteSession, defaultMailHosts, getSession } from '../lib/session';
+import {
+  createJtyidSession,
+  createSession,
+  assertJtyidIdentityContinuity,
+  defaultMailHosts,
+  getSession,
+  resolveJtyidSessionMatch,
+  resolvePasswordSessionMatch,
+  revokeAndDeleteSession,
+  updateJtyidSession,
+} from '../lib/session';
 import { db, schema } from '../db';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, or } from 'drizzle-orm';
 import { createRateLimiter } from '../lib/rate-limit';
 import { audit } from '../lib/audit-log';
 import { clientIp } from '../lib/client-ip';
+import { createJtyidAuthRoutes } from './jtyid-auth';
+import type { OidcConfig } from '../lib/jtyid-oidc';
 
 export const authRoutes = new Hono();
 
@@ -151,9 +163,7 @@ async function readLiveSessionIds(raw: string | undefined): Promise<string[]> {
     columns: { id: true, expiresAt: true },
   });
   const now = Date.now();
-  const alive = new Set(
-    rows.filter((r) => r.expiresAt.getTime() > now).map((r) => r.id),
-  );
+  const alive = new Set(rows.filter((r) => r.expiresAt.getTime() > now).map((r) => r.id));
   return ids.filter((id) => alive.has(id));
 }
 
@@ -168,6 +178,103 @@ function writeSessionListCookie(c: any, ids: string[], expiresAt?: Date) {
     // expiry on this cookie, only the membership.
     expires: expiresAt ?? new Date(Date.now() + env.SESSION_TTL_SECONDS * 1000),
   });
+}
+
+authRoutes.get('/methods', (c) => c.json({ jtyid: Boolean(env.JTYID_OIDC_CLIENT_SECRET) }));
+
+if (env.JTYID_OIDC_CLIENT_SECRET) {
+  const jtyidConfig: OidcConfig = {
+    issuer: env.JTYID_OIDC_ISSUER,
+    clientId: env.JTYID_OIDC_CLIENT_ID,
+    clientSecret: env.JTYID_OIDC_CLIENT_SECRET,
+    redirectUri: `${env.PUBLIC_URL}/auth/jtyid/callback`,
+    authorizationEndpoint: env.JTYID_OIDC_AUTHORIZATION_ENDPOINT,
+    tokenEndpoint: env.JTYID_OIDC_TOKEN_ENDPOINT,
+    userinfoEndpoint: env.JTYID_OIDC_USERINFO_ENDPOINT,
+    jwksUri: env.JTYID_OIDC_JWKS_URI,
+    revocationEndpoint: env.JTYID_OIDC_REVOCATION_ENDPOINT,
+  };
+
+  authRoutes.route(
+    '/',
+    createJtyidAuthRoutes({
+      config: jtyidConfig,
+      probeMailbox: async (identity, accessToken) => {
+        const hosts = defaultMailHosts(identity.email);
+        return probeImap({
+          host: hosts.imapHost,
+          port: hosts.imapPort,
+          user: identity.email,
+          accessToken,
+        });
+      },
+      completeLogin: async (c, identity, tokens) => {
+        const identityRows = await db.query.session.findMany({
+          where: or(
+            eq(schema.session.providerSubject, identity.subject),
+            eq(schema.session.jtyid, identity.jtyid),
+          ),
+          columns: {
+            id: true,
+            email: true,
+            authMode: true,
+            providerSubject: true,
+            jtyid: true,
+          },
+        });
+        assertJtyidIdentityContinuity(identityRows, identity);
+        const existingIds = await readLiveSessionIds(getCookie(c, LIST_COOKIE_NAME));
+        const existingRows = existingIds.length
+          ? await db.query.session.findMany({
+              where: inArray(schema.session.id, existingIds),
+              columns: {
+                id: true,
+                email: true,
+                authMode: true,
+                providerSubject: true,
+                jtyid: true,
+                expiresAt: true,
+              },
+            })
+          : [];
+        const existing = resolveJtyidSessionMatch(existingRows, identity);
+        const hosts = defaultMailHosts(identity.email);
+        const accessTokenExpiresAt = new Date(Date.now() + tokens.expiresIn * 1_000);
+        let activeId: string;
+        let activeExpiresAt: Date;
+        if (existing) {
+          await updateJtyidSession(existing.id, {
+            identity,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            accessTokenExpiresAt,
+          });
+          activeId = existing.id;
+          activeExpiresAt = existing.expiresAt;
+        } else {
+          const created = await createJtyidSession({
+            identity,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            accessTokenExpiresAt,
+            ...hosts,
+          });
+          activeId = created.id;
+          activeExpiresAt = created.expiresAt;
+        }
+        const liveIds = [activeId, ...existingIds.filter((id) => id !== activeId)];
+        setActiveCookies(c, activeId, activeExpiresAt);
+        writeSessionListCookie(c, liveIds, activeExpiresAt);
+        audit({
+          event: 'sign-in',
+          ok: true,
+          ip: clientIp(c),
+          sessionId: activeId,
+          reason: 'jtyid',
+        });
+      },
+    }),
+  );
 }
 
 authRoutes.post('/sign-in', async (c) => {
@@ -201,9 +308,7 @@ authRoutes.post('/sign-in', async (c) => {
   }
 
   // Hosts are server-side only - see schemas.ts for the rationale.
-  const { imapHost, imapPort, smtpHost, smtpPort } = defaultMailHosts(
-    parsed.data.email,
-  );
+  const { imapHost, imapPort, smtpHost, smtpPort } = defaultMailHosts(parsed.data.email);
 
   const ok = await probeImap({
     host: imapHost,
@@ -223,10 +328,17 @@ authRoutes.post('/sign-in', async (c) => {
   const existingRows = existingIds.length
     ? await db.query.session.findMany({
         where: inArray(schema.session.id, existingIds),
-        columns: { id: true, email: true, expiresAt: true },
+        columns: {
+          id: true,
+          email: true,
+          expiresAt: true,
+          authMode: true,
+          providerSubject: true,
+          jtyid: true,
+        },
       })
     : [];
-  const existing = existingRows.find((r) => r.email === lcEmail);
+  const existing = resolvePasswordSessionMatch(existingRows, lcEmail);
 
   let activeId: string;
   let activeExpiresAt: Date;
@@ -234,7 +346,10 @@ authRoutes.post('/sign-in', async (c) => {
 
   if (existing) {
     if (parsed.data.name !== undefined) {
-      await db.update(schema.session).set({ name: parsed.data.name }).where(eq(schema.session.id, existing.id));
+      await db
+        .update(schema.session)
+        .set({ name: parsed.data.name })
+        .where(eq(schema.session.id, existing.id));
     }
     activeId = existing.id;
     activeExpiresAt = existing.expiresAt;
@@ -266,14 +381,20 @@ authRoutes.post('/sign-in', async (c) => {
 authRoutes.post('/sign-out', async (c) => {
   const ip = clientIp(c);
   const sid = getCookie(c, env.SESSION_COOKIE_NAME);
-  if (sid) await deleteSession(sid);
-  audit({ event: 'sign-out', ok: true, ip, sessionId: sid });
+  const revoked = sid ? await revokeAndDeleteSession(sid) : true;
+  audit({
+    event: 'sign-out',
+    ok: true,
+    ip,
+    sessionId: sid,
+    ...(revoked ? {} : { reason: 'grant-revocation-failed' }),
+  });
 
   // Drop this id from the list and either fall back to whichever session
   // is next, or clear both cookies so the client lands on /login.
-  const liveIds = (
-    await readLiveSessionIds(getCookie(c, LIST_COOKIE_NAME))
-  ).filter((id) => id !== sid);
+  const liveIds = (await readLiveSessionIds(getCookie(c, LIST_COOKIE_NAME))).filter(
+    (id) => id !== sid,
+  );
 
   if (liveIds.length === 0) {
     clearActiveCookies(c);
@@ -302,7 +423,7 @@ authRoutes.post('/sign-out', async (c) => {
 // the row + encrypted password were already created on the original sign-in.
 authRoutes.post('/switch', async (c) => {
   const ip = clientIp(c);
-  const body = await c.req.json().catch(() => null) as { sessionId?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as { sessionId?: unknown } | null;
   const target = typeof body?.sessionId === 'string' ? body.sessionId : null;
   if (!target) {
     audit({ event: 'switch', ok: false, ip, reason: 'missing-session-id' });

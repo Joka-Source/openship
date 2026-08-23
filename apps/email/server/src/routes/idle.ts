@@ -17,6 +17,7 @@ import { getCookie } from 'hono/cookie';
 import { ImapFlow } from 'imapflow';
 import { env } from '../env';
 import { getSession } from '../lib/session';
+import { imapClientOptions } from '../lib/imap';
 
 export const idleRoute = new Hono();
 
@@ -29,13 +30,16 @@ idleRoute.get('/idle', async (c) => {
   const folder = c.req.query('folder') || 'INBOX';
 
   return streamSSE(c, async (stream) => {
-    const client = new ImapFlow({
-      host: session.imapHost,
-      port: session.imapPort,
-      secure: session.imapPort === 993,
-      auth: { user: session.email, pass: session.password },
-      logger: false,
-    });
+    const client = new ImapFlow(
+      imapClientOptions({
+        host: session.imapHost,
+        port: session.imapPort,
+        user: session.email,
+        ...(session.authMode === 'jtyid'
+          ? { accessToken: session.accessToken! }
+          : { pass: session.password! }),
+      }),
+    );
 
     const send = async (event: string, data: unknown) => {
       await stream.writeSSE({ event, data: JSON.stringify(data) });
