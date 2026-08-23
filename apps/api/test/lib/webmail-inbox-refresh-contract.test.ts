@@ -8,6 +8,10 @@ const mailLayout = readFileSync(
   resolve(repoRoot, "apps/email/client/components/mail/mail.tsx"),
   "utf8",
 );
+const idleRoute = readFileSync(
+  resolve(repoRoot, "apps/email/server/src/routes/idle.ts"),
+  "utf8",
+);
 
 describe("webmail inbox freshness", () => {
   it("subscribes once to IMAP IDLE events and refetches the visible folder", () => {
@@ -22,5 +26,14 @@ describe("webmail inbox freshness", () => {
     expect(mailLayout).toContain("document.visibilityState === 'visible'");
     expect(mailLayout).toContain("visibilitychange");
     expect(mailLayout).toContain("window.clearInterval");
+  });
+
+  it("normalizes route folders and arms socket cleanup before IMAP can block", () => {
+    expect(idleRoute).toContain("normalizeFolderSlug(c.req.query('folder'))");
+    expect(idleRoute).toContain("folderToMailbox(folder)");
+    expect(idleRoute).toContain("client.mailboxOpen(mailbox)");
+    expect(idleRoute.indexOf("bindImapAbort(stream, client)")).toBeLessThan(
+      idleRoute.indexOf("await client.connect()"),
+    );
   });
 });
