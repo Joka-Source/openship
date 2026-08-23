@@ -68,6 +68,7 @@ import { resolveMailEngine, resolveMailFlavor } from "./mail-engine";
 import { updatePostmasterPassword } from "./mail-credentials.service";
 import { reserveMailSetup } from "./mail-setup-lease";
 import { preflightMailSetup } from "./mail-setup-preflight";
+import { jtyidDovecotEngineSecrets } from "./jtyid-dovecot";
 import { applyRelayToState } from "./admin/outbound-relay.service";
 // The webmail is an ordinary project: its status is resolved from the DB, not
 // from this server's state file.
@@ -931,6 +932,11 @@ export async function startSetup(c: Context) {
                 ...config,
                 prefillSecrets:
                   Object.keys(state.secrets).length > 0 ? state.secrets : undefined,
+                runtimeSecrets: jtyidDovecotEngineSecrets({
+                  clientId: env.JTYID_DOVECOT_INTROSPECTION_CLIENT_ID,
+                  secret: env.JTYID_DOVECOT_INTROSPECTION_SECRET,
+                  introspectionUrl: env.JTYID_DOVECOT_INTROSPECTION_URL,
+                }),
               };
               return sshManager.withExecutor(serverId, async (executor) => {
                 await deliverBefore("mail", pinnedMailImage(), executor);

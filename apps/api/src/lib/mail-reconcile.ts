@@ -10,6 +10,8 @@ import {
 } from "@repo/adapters";
 import { safeErrorMessage } from "@repo/core";
 
+import { env } from "../config/env";
+import { jtyidDovecotEngineSecrets } from "../modules/mail/jtyid-dovecot";
 import { deliverManagedImage } from "./deliver-managed-image";
 import { pinnedMailImage } from "./mail-image";
 
@@ -28,11 +30,11 @@ import { pinnedMailImage } from "./mail-image";
  * lose it. We therefore gate on a RUNNING engine and bail otherwise: a mail box
  * that isn't up is a setup/repair concern, not an update one.
  *
- * On the swap path `ensureContainerMail` reads only `domain` (for the engine's
- * `--hostname mail.<domain>`) and reuses the on-disk env-file, so `secrets: {}`
- * is correct and never written. The swap is rollback-guarded: a new image that
- * fails to come up rolls back to the previous one, and only a failed rollback
- * reports `mailDown`.
+ * On the swap path `ensureContainerMail` overlays only the three runtime-owned JTYID
+ * Dovecot records onto the retained engine env-file. Every installer-owned mail/DB
+ * credential remains untouched, and a failed start restores the exact previous file
+ * before the old image is relaunched. An explicit empty introspection secret disables
+ * OAuth without disabling the retained PLAIN/LOGIN fallback.
  *
  * Best-effort by contract, like the edge reconcile: a throw is caught and
  * reported, and the swap path itself never throws (it reports `mailDown`).
@@ -64,7 +66,14 @@ export async function reconcileServerMail(
     const result = await ensureContainerMail(executor, {
       onLog: opts.onLog,
       domain: opts.domain,
-      secrets: {},
+      secrets: jtyidDovecotEngineSecrets(
+        {
+          clientId: env.JTYID_DOVECOT_INTROSPECTION_CLIENT_ID,
+          secret: env.JTYID_DOVECOT_INTROSPECTION_SECRET,
+          introspectionUrl: env.JTYID_DOVECOT_INTROSPECTION_URL,
+        },
+        { includeDisabled: true },
+      ),
       image,
     });
     return {

@@ -179,6 +179,137 @@ describe("ensureContainerMail swap", () => {
     expect(cmds.some((c) => c.includes("docker run") && c.includes("--network host"))).toBe(true);
     expect(cmds.some((c) => c.startsWith("docker pull"))).toBe(false);
   });
+
+  it("merges only the managed JTYID OAuth settings into the retained engine env before swapping", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const existing = [
+      "FIRST_DOMAIN=example.com",
+      "VMAIL_DB_PASSWORD=keep-this-password",
+      "JTYID_DOVECOT_INTROSPECTION_SECRET=old-secret",
+      "",
+    ].join("\n");
+    const writeFile = vi.fn(async (_path: string, _content: string) => {});
+    const readFile = vi.fn(async (path: string) => {
+      if (path.endsWith("engine.env")) return existing;
+      throw new Error("ENOENT");
+    });
+    const streamExec = vi.fn(async (_cmd: string) => ({ code: 0, output: "" }));
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("docker image inspect")) return "sha256:present\n";
+      if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
+      return "";
+    });
+    const executor = { exec, streamExec, writeFile, readFile } as never;
+
+    const result = await ensureContainerMail(executor, {
+      domain: "example.com",
+      secrets: {
+        JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: "openship-mail-dovecot",
+        JTYID_DOVECOT_INTROSPECTION_SECRET: "rotated-secret",
+        JTYID_DOVECOT_INTROSPECTION_URL: "https://id.jjty.in/application/o/introspect/",
+        UNRELATED_NEW_SETTING: "must-not-be-added-during-a-swap",
+      },
+      onLog: () => {},
+    });
+
+    expect(result.updated).toBe(true);
+    const engineWrite = writeFile.mock.calls.find(([path]) => String(path).endsWith("engine.env"));
+    expect(engineWrite).toBeDefined();
+    const body = String(engineWrite?.[1]);
+    expect(body).toContain("FIRST_DOMAIN=example.com\n");
+    expect(body).toContain("VMAIL_DB_PASSWORD=keep-this-password\n");
+    expect(body).toContain("JTYID_DOVECOT_INTROSPECTION_CLIENT_ID=openship-mail-dovecot\n");
+    expect(body).toContain("JTYID_DOVECOT_INTROSPECTION_SECRET=rotated-secret\n");
+    expect(body).toContain(
+      "JTYID_DOVECOT_INTROSPECTION_URL=https://id.jjty.in/application/o/introspect/\n",
+    );
+    expect(body).not.toContain("old-secret");
+    expect(body).not.toContain("UNRELATED_NEW_SETTING");
+    expect(exec.mock.calls.map(([command]) => String(command)).join("\n")).not.toContain(
+      "rotated-secret",
+    );
+    expect(streamExec.mock.calls.map(([command]) => String(command)).join("\n")).not.toContain(
+      "rotated-secret",
+    );
+  });
+
+  it("restores the exact prior engine env before rollback when the OAuth-enabled start fails", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const existing =
+      "FIRST_DOMAIN=example.com\nJTYID_DOVECOT_INTROSPECTION_SECRET=previous-secret\n";
+    const writes: string[] = [];
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      if (path.endsWith("engine.env")) writes.push(content);
+    });
+    const readFile = vi.fn(async () => existing);
+    let launches = 0;
+    const streamExec = vi.fn(async (cmd: string) => {
+      if (cmd.includes("docker run") && cmd.includes("--network host")) {
+        launches += 1;
+        return { code: launches === 1 ? 1 : 0, output: "" };
+      }
+      return { code: 0, output: "" };
+    });
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("docker image inspect")) return "sha256:present\n";
+      if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
+      return "";
+    });
+    const executor = { exec, streamExec, writeFile, readFile } as never;
+
+    const result = await ensureContainerMail(executor, {
+      domain: "example.com",
+      secrets: {
+        JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: "openship-mail-dovecot",
+        JTYID_DOVECOT_INTROSPECTION_SECRET: "rejected-secret",
+        JTYID_DOVECOT_INTROSPECTION_URL: "https://id.jjty.in/application/o/introspect/",
+      },
+      onLog: () => {},
+    });
+
+    expect(result.updated).toBe(false);
+    expect(result.mailDown).toBe(false);
+    expect(launches).toBe(2);
+    expect(writes.at(-1)).toBe(existing);
+  });
+
+  it("restores the prior engine env when image acquisition fails before any start attempt", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const existing = "FIRST_DOMAIN=example.com\n";
+    const writes: string[] = [];
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      if (path.endsWith("engine.env")) writes.push(content);
+    });
+    const readFile = vi.fn(async () => existing);
+    const streamExec = vi.fn(async (cmd: string) => ({
+      code: cmd.startsWith("docker pull") ? 1 : 0,
+      output: "",
+    }));
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("docker image inspect")) return "";
+      return "";
+    });
+    const executor = { exec, streamExec, writeFile, readFile } as never;
+
+    const result = await ensureContainerMail(executor, {
+      domain: "example.com",
+      secrets: {
+        JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: "openship-mail-dovecot",
+        JTYID_DOVECOT_INTROSPECTION_SECRET: "new-secret",
+        JTYID_DOVECOT_INTROSPECTION_URL: "https://id.jjty.in/application/o/introspect/",
+      },
+      onLog: () => {},
+    });
+
+    expect(result.updated).toBe(false);
+    expect(writes.at(-1)).toBe(existing);
+    expect(streamExec.mock.calls.some(([cmd]) => String(cmd).includes("--network host"))).toBe(
+      false,
+    );
+  });
 });
 
 /**

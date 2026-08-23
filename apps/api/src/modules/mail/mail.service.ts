@@ -237,6 +237,12 @@ export interface IRedMailConfig {
    * the original set is the fix.
    */
   prefillSecrets?: Record<string, string>;
+  /**
+   * Ephemeral engine-only settings supplied by the API runtime. These are passed
+   * to the protected engine env-file but deliberately excluded from `data.secrets`,
+   * so provider credentials never enter persisted mail setup state or the UI.
+   */
+  runtimeSecrets?: Record<string, string>;
 }
 
 // ─── Step runners ────────────────────────────────────────────────────────────
@@ -618,7 +624,7 @@ export async function stepDeployEngine(
   try {
     const result = await ensureContainerMail(exec, {
       domain,
-      secrets,
+      secrets: { ...secrets, ...(config?.runtimeSecrets ?? {}) },
       onLog: bridgeToSystemLog(stepId, log),
       // The engine image is delivered before this call (deliverManagedImage in the
       // deploy_engine step) — dev builds on the control plane and ships to the box,
@@ -1168,5 +1174,3 @@ export const STEP_RUNNERS: Record<
   7: stepRequestSSL,
   8: stepConfigureSSL,
 };
-
-

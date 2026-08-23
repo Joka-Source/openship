@@ -27,7 +27,8 @@
 # Env (from ensure-container-mail.ts --env-file): FIRST_DOMAIN,
 # OPENSHIP_MAIL_DB_{HOST,PORT,NAME,USER}, plus iRedMail secrets
 # (VMAIL_DB_ADMIN_PASSWD, VMAIL_DB_BIND_PASSWD, AMAVISD_DB_PASSWD,
-# IREDAPD_DB_PASSWD, FAIL2BAN_DB_PASSWD, PGSQL_ROOT_PASSWD, DOMAIN_ADMIN_PASSWD_PLAIN).
+# IREDAPD_DB_PASSWD, FAIL2BAN_DB_PASSWD, PGSQL_ROOT_PASSWD, DOMAIN_ADMIN_PASSWD_PLAIN)
+# and the dedicated JTYID_DOVECOT_INTROSPECTION_{CLIENT_ID,SECRET,URL} contract.
 set -euo pipefail
 
 log() { echo "[openship-mail] $*"; }
@@ -50,6 +51,13 @@ seed postfix /etc/postfix
 seed dovecot /etc/dovecot
 seed amavis-confd /etc/amavis/conf.d
 mkdir -p /var/vmail /var/spool/postfix /var/lib/dkim /var/lib/clamav
+
+# Reconcile the managed JTYID OAuth fragment on every boot, including upgrades
+# whose persistent /etc/dovecot mount predates OAuth support. The helper copies a
+# fresh baked fragment before substituting the engine-only introspection secret,
+# which makes rotation atomic and removes the old credential when OAuth is disabled.
+DOVECOT_SEED_DIR="$SEED_DIR/dovecot" \
+  /opt/openship-mail/configure-dovecot-jtyid-oauth.sh
 
 # 2. reconcile baked placeholder secrets -> the real shared role password.
 #    The image is built with `build-placeholder` in every daemon's DB config; all

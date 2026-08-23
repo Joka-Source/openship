@@ -107,6 +107,32 @@ dovecot_config()
     export FIRST_DOMAIN
     perl -pi -e 's#PH_AUTH_DEFAULT_REALM#$ENV{FIRST_DOMAIN}#' ${DOVECOT_CONF}
 
+    # OAuth access-token authentication. Dovecot 2.3 reads the provider settings
+    # from the oauth2 passdb args file; 2.4 moved the same settings into the named
+    # oauth2 filter in dovecot.conf. The build carries only a distinct marker and
+    # the runtime entrypoint injects the protected introspection secret.
+    export JTYID_DOVECOT_INTROSPECTION_CLIENT_ID
+    export JTYID_DOVECOT_INTROSPECTION_SECRET
+    export JTYID_DOVECOT_INTROSPECTION_URL
+    mkdir -p ${DOVECOT_CONF_INCLUDE_DIR}
+    if [[ ${DOVECOT_VERSION} == "2.3" ]]; then
+        cp -f ${SAMPLE_DIR}/dovecot/dovecot-oauth2.conf ${DOVECOT_OAUTH2_CONF}
+        cp -f ${SAMPLE_DIR}/dovecot/dovecot-jtyid-oauth-2.3.conf ${DOVECOT_JTYID_OAUTH_CONF}
+        perl -pi -e 's#PH_DOVECOT_OAUTH2_CONF#$ENV{DOVECOT_OAUTH2_CONF}#' ${DOVECOT_JTYID_OAUTH_CONF}
+        perl -pi -e 's#PH_JTYID_DOVECOT_INTROSPECTION_CLIENT_ID#$ENV{JTYID_DOVECOT_INTROSPECTION_CLIENT_ID}#' ${DOVECOT_OAUTH2_CONF}
+        perl -pi -e 's#PH_JTYID_DOVECOT_INTROSPECTION_SECRET#$ENV{JTYID_DOVECOT_INTROSPECTION_SECRET}#' ${DOVECOT_OAUTH2_CONF}
+        perl -pi -e 's#PH_JTYID_DOVECOT_INTROSPECTION_URL#$ENV{JTYID_DOVECOT_INTROSPECTION_URL}#' ${DOVECOT_OAUTH2_CONF}
+        chown root:${SYS_GROUP_DOVECOT} ${DOVECOT_OAUTH2_CONF} ${DOVECOT_JTYID_OAUTH_CONF}
+        chmod 0640 ${DOVECOT_OAUTH2_CONF} ${DOVECOT_JTYID_OAUTH_CONF}
+    else
+        cp -f ${SAMPLE_DIR}/dovecot/dovecot-jtyid-oauth-2.4.conf ${DOVECOT_JTYID_OAUTH_CONF}
+        perl -pi -e 's#PH_JTYID_DOVECOT_INTROSPECTION_CLIENT_ID#$ENV{JTYID_DOVECOT_INTROSPECTION_CLIENT_ID}#' ${DOVECOT_JTYID_OAUTH_CONF}
+        perl -pi -e 's#PH_JTYID_DOVECOT_INTROSPECTION_SECRET#$ENV{JTYID_DOVECOT_INTROSPECTION_SECRET}#' ${DOVECOT_JTYID_OAUTH_CONF}
+        perl -pi -e 's#PH_JTYID_DOVECOT_INTROSPECTION_URL#$ENV{JTYID_DOVECOT_INTROSPECTION_URL}#' ${DOVECOT_JTYID_OAUTH_CONF}
+        chown root:${SYS_GROUP_DOVECOT} ${DOVECOT_JTYID_OAUTH_CONF}
+        chmod 0640 ${DOVECOT_JTYID_OAUTH_CONF}
+    fi
+
     # service auth {}
     perl -pi -e 's#PH_DOVECOT_AUTH_USER#$ENV{SYS_USER_POSTFIX}#' ${DOVECOT_CONF}
     perl -pi -e 's#PH_DOVECOT_AUTH_GROUP#$ENV{SYS_GROUP_POSTFIX}#' ${DOVECOT_CONF}
@@ -580,4 +606,3 @@ EOF
 
     echo 'export status_dovecot_setup="DONE"' >> ${STATUS_FILE}
 }
-

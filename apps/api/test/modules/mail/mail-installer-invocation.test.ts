@@ -80,4 +80,26 @@ describe("step 5 engine deploy", () => {
 
     expect(streamed.some((c) => c.includes("iRedMail.sh"))).toBe(false);
   });
+
+  test("forwards runtime-only provider settings without returning them for persistence", async () => {
+    ensureContainerMail.mockClear();
+    const { executor } = engineExecutor();
+
+    const result = await stepDeployEngine(executor, "example.com", () => {}, {
+      runtimeSecrets: {
+        JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: "openship-mail-dovecot",
+        JTYID_DOVECOT_INTROSPECTION_SECRET: "test-runtime-only-value",
+        JTYID_DOVECOT_INTROSPECTION_URL:
+          "https://id.jjty.in/application/o/introspect/",
+      },
+    });
+
+    const opts = ensureContainerMail.mock.calls[0][1] as {
+      secrets: Record<string, string>;
+    };
+    expect(opts.secrets.JTYID_DOVECOT_INTROSPECTION_SECRET).toBe("test-runtime-only-value");
+    expect(result.data?.secrets).not.toHaveProperty("JTYID_DOVECOT_INTROSPECTION_SECRET");
+    expect(result.data?.secrets).not.toHaveProperty("JTYID_DOVECOT_INTROSPECTION_CLIENT_ID");
+    expect(result.data?.secrets).not.toHaveProperty("JTYID_DOVECOT_INTROSPECTION_URL");
+  });
 });

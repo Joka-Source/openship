@@ -182,6 +182,23 @@ function mountArg(m: MailMount): string {
  */
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+const MANAGED_ENGINE_ENV_KEYS = [
+  "JTYID_DOVECOT_INTROSPECTION_CLIENT_ID",
+  "JTYID_DOVECOT_INTROSPECTION_SECRET",
+  "JTYID_DOVECOT_INTROSPECTION_URL",
+] as const;
+
+function validateEnvRecord(key: string, value: string): void {
+  if (!ENV_KEY_RE.test(key)) {
+    throw new Error(`Refusing to write env-file: invalid variable name ${JSON.stringify(key)}.`);
+  }
+  if (/[\r\n]/.test(value)) {
+    throw new Error(
+      `Refusing to write env-file: value for ${key} spans multiple lines, which would inject additional environment records.`,
+    );
+  }
+}
+
 /**
  * Write the env-file the launcher passes via `--env-file`, mode 0600.
  *
@@ -194,14 +211,7 @@ async function writeEnvFile(
   env: Record<string, string>,
 ): Promise<void> {
   for (const [k, v] of Object.entries(env)) {
-    if (!ENV_KEY_RE.test(k)) {
-      throw new Error(`Refusing to write env-file: invalid variable name ${JSON.stringify(k)}.`);
-    }
-    if (/[\r\n]/.test(v)) {
-      throw new Error(
-        `Refusing to write env-file: value for ${k} spans multiple lines, which would inject additional environment records.`,
-      );
-    }
+    validateEnvRecord(k, v);
   }
   const body =
     Object.entries(env)
@@ -209,6 +219,50 @@ async function writeEnvFile(
       // whole rest of the line verbatim as the value.
       .map(([k, v]) => `${k}=${v}`)
       .join("\n") + "\n";
+  await executor.writeFile(path, body);
+  await executor.exec(`chmod 600 ${sq(path)}`).catch(() => {});
+}
+
+/**
+ * Overlay the three runtime-owned JTYID settings without re-deriving or replacing any
+ * installer-owned mail credentials. The original body is retained byte-for-byte for a
+ * failed-start rollback; only matching records are replaced and missing records appended.
+ */
+function mergeManagedEngineEnv(
+  body: string,
+  secrets: Record<string, string>,
+): { body: string; changed: boolean } {
+  const updates = MANAGED_ENGINE_ENV_KEYS.flatMap((key) => {
+    const value = secrets[key];
+    if (value === undefined) return [];
+    validateEnvRecord(key, value);
+    return [[key, value] as const];
+  });
+  if (updates.length === 0) return { body, changed: false };
+
+  const endedWithNewline = body.endsWith("\n");
+  const lines = body.split("\n");
+  if (endedWithNewline) lines.pop();
+
+  for (const [key, value] of updates) {
+    const prefix = `${key}=`;
+    const matches = lines.flatMap((line, index) => (line.startsWith(prefix) ? [index] : []));
+    if (matches.length > 1) {
+      throw new Error(`Refusing to update ${ENGINE_ENV_FILE}: duplicate ${key} records.`);
+    }
+    if (matches.length === 1) lines[matches[0]] = `${key}=${value}`;
+    else lines.push(`${key}=${value}`);
+  }
+
+  const merged = `${lines.join("\n")}\n`;
+  return { body: merged, changed: merged !== body };
+}
+
+async function writeEnvFileBody(
+  executor: CommandExecutor,
+  path: string,
+  body: string,
+): Promise<void> {
   await executor.writeFile(path, body);
   await executor.exec(`chmod 600 ${sq(path)}`).catch(() => {});
 }
@@ -514,7 +568,28 @@ export async function ensureContainerMail(
   // image there first), so the dev flow needs no build-on-executor branch.
   const current = await containerImageRef(executor, container);
   if (current) {
-    if (current === image) return { container, dbContainer, image, updated: false };
+    let originalEngineEnv: string | undefined;
+    let managedEnvChanged = false;
+    if (MANAGED_ENGINE_ENV_KEYS.some((key) => opts.secrets[key] !== undefined)) {
+      const hostState = await rootOrDegrade(executor, {
+        purpose: "Updating the mail engine's JTYID OAuth settings",
+        consequence: "The engine stays on its current image and authentication settings.",
+        report: (message) => onLog(log(message, "warn")),
+      });
+      originalEngineEnv = await hostState.readFile(ENGINE_ENV_FILE);
+      const merged = mergeManagedEngineEnv(originalEngineEnv, opts.secrets);
+      managedEnvChanged = merged.changed;
+      if (managedEnvChanged) {
+        // ElevatedExecutor publishes through a private staging directory and atomic rename;
+        // neither the secret nor the complete env-file ever appears in argv or logs.
+        await writeEnvFileBody(hostState, ENGINE_ENV_FILE, merged.body);
+        await handOverEnvFile(executor, ENGINE_ENV_FILE, onLog);
+      }
+    }
+
+    if (current === image && !managedEnvChanged) {
+      return { container, dbContainer, image, updated: false };
+    }
 
     // The `engine.env` this swap launches against was written by a PREVIOUS install, so on
     // a box provisioned before GH-630 it is still root-owned and no amount of relaunching
@@ -524,7 +599,38 @@ export async function ensureContainerMail(
     // `mailDown` with nothing in the log pointing at permissions.
     await handOverEnvFile(executor, ENGINE_ENV_FILE, onLog);
 
-    const start = makeMailStart(executor, container, opts);
+    const startEngineImage = makeMailStart(executor, container, opts);
+    const restoreOriginalEngineEnv = async (): Promise<void> => {
+      if (!managedEnvChanged || originalEngineEnv === undefined) return;
+      const hostState = await rootOrDegrade(executor, {
+        purpose: "Rolling back the mail engine's JTYID OAuth settings",
+        consequence: "The mail engine may retain settings that were not applied.",
+        report: (message) => onLog(log(message, "warn")),
+      });
+      await writeEnvFileBody(hostState, ENGINE_ENV_FILE, originalEngineEnv);
+      await handOverEnvFile(executor, ENGINE_ENV_FILE, onLog);
+    };
+    let startAttempt = 0;
+    const start = async (candidate: string): Promise<boolean> => {
+      startAttempt += 1;
+      // `swapManagedImage` calls the start callback a second time only for rollback.
+      // Put back the exact previous env before that attempt, so a bad/rotated OAuth
+      // credential cannot take password mail down along with the failed new config.
+      if (startAttempt > 1 && managedEnvChanged && originalEngineEnv !== undefined) {
+        try {
+          await restoreOriginalEngineEnv();
+        } catch (err) {
+          onLog(
+            log(
+              `Could not restore the previous mail authentication settings: ${safeErrorMessage(err)}.`,
+              "error",
+            ),
+          );
+          return false;
+        }
+      }
+      return startEngineImage(candidate);
+    };
     const swap = await swapManagedImage(executor, {
       kind: "mail",
       from: current,
@@ -533,6 +639,10 @@ export async function ensureContainerMail(
       onLog,
       start,
     });
+    // Pull/from-source acquisition can fail before `start` is called. The live
+    // container was never touched in that case, so restore the retained file too;
+    // otherwise a later manual recreate would unexpectedly adopt unapplied settings.
+    if (!swap.swapped && startAttempt === 0) await restoreOriginalEngineEnv();
     return { container, dbContainer, image, updated: swap.swapped, mailDown: swap.down };
   }
 
