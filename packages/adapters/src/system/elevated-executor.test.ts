@@ -1,5 +1,17 @@
 import { describe, it, expect, vi } from "vitest";
 import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { elevatedExecutor, elevateCommand, ensureOwnedDir } from "./elevated-executor";
 import { probeOutput } from "./environment.fixtures";
 import { sq } from "./local-shell";
@@ -120,6 +132,78 @@ describe("elevatedExecutor", () => {
       ),
     );
     expect(String(exec.mock.calls[2]?.[0])).toBe(`rm -rf ${sq(stageDirOf(staged))}`);
+  });
+
+  function realModeExecutor(opts: { failModeApply?: boolean } = {}) {
+    const exec = vi.fn(async (command: string) => {
+      let runnable = command;
+      if (command.startsWith("sudo -n sh -c ")) {
+        const quotedPayload = command.slice("sudo -n sh -c ".length);
+        runnable = execFileSync("sh", ["-c", `printf %s ${quotedPayload}`], {
+          encoding: "utf8",
+        });
+      }
+      // The test process is not root. Preserve the elevated command's ordering while
+      // substituting only chown; chmod and mv still execute against real files/modes.
+      runnable = runnable.replace(/chown 0:0 ('[^']+')/g, ":");
+      if (opts.failModeApply) {
+        runnable = runnable.replace(/chmod 600 ('[^']+')/, "false");
+      }
+      return execFileSync("sh", ["-c", runnable], { encoding: "utf8" });
+    });
+    const inner = {
+      exec,
+      streamExec: vi.fn(async () => ({ code: 0, output: "" })),
+      writeFile: vi.fn(async (path: string, content: string) => {
+        writeFileSync(path, content);
+        // Make the exposure deterministic even under a restrictive developer umask.
+        chmodSync(path, 0o644);
+      }),
+      readFile: vi.fn(async (path: string) => readFileSync(path, "utf8")),
+      exists: vi.fn(async (path: string) => existsSync(path)),
+      mkdir: vi.fn(async (path: string) => mkdirSync(path, { recursive: true })),
+      rm: vi.fn(async (path: string) => rmSync(path, { recursive: true, force: true })),
+    } as unknown as CommandExecutor;
+    return elevatedExecutor(inner) as CommandExecutor & {
+      writeFileWithMode(path: string, content: string, mode: number): Promise<void>;
+    };
+  }
+
+  it("publishes a mode-aware secret at 0600 without a world-readable destination window", async () => {
+    const root = mkdtempSync(resolve(tmpdir(), "openship-mode-write-"));
+    try {
+      const destination = resolve(root, "etc/dovecot/dovecot-oauth2.conf.ext");
+      mkdirSync(resolve(destination, ".."), { recursive: true });
+
+      await realModeExecutor().writeFileWithMode(destination, "introspection-secret", 0o600);
+
+      expect(readFileSync(destination, "utf8")).toBe("introspection-secret");
+      expect(statSync(destination).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not publish the staged secret when applying its restrictive mode fails", async () => {
+    const root = mkdtempSync(resolve(tmpdir(), "openship-mode-write-fail-"));
+    try {
+      const destination = resolve(root, "etc/dovecot/dovecot-oauth2.conf.ext");
+      mkdirSync(resolve(destination, ".."), { recursive: true });
+      writeFileSync(destination, "previous-config", { mode: 0o640 });
+
+      await expect(
+        realModeExecutor({ failModeApply: true }).writeFileWithMode(
+          destination,
+          "introspection-secret",
+          0o600,
+        ),
+      ).rejects.toThrow();
+
+      expect(readFileSync(destination, "utf8")).toBe("previous-config");
+      expect(statSync(destination).mode & 0o777).toBe(0o640);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("removes the staged plaintext when the elevated publish fails, and still throws", async () => {

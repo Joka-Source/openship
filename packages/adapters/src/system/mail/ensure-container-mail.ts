@@ -29,7 +29,7 @@ import {
   managedImagesAreFromSource,
   swapManagedImage,
 } from "../managed-image";
-import { dirOf, elevatedExecutor } from "../elevated-executor";
+import { dirOf, elevatedExecutor, writeFileWithMode } from "../elevated-executor";
 import { resolveEnvironment } from "../environment";
 import { waitForPortListening } from "../port-listen";
 import { rootOrDegrade } from "../privilege";
@@ -278,7 +278,7 @@ const PERSISTENT_DOVECOT_CONFIG_FILES = [
 
 type PersistentFileSnapshot =
   | { path: string; present: false }
-  | { path: string; present: true; content: string; mode: string };
+  | { path: string; present: true; content: string; mode: number };
 
 /**
  * Capture the exact persistent Dovecot files an engine entrypoint may reconcile.
@@ -304,7 +304,12 @@ async function snapshotPersistentDovecotConfig(
     if (!match) {
       throw new Error(`Could not snapshot persistent Dovecot file metadata for ${path}.`);
     }
-    snapshots.push({ path, present: true, content: await executor.readFile(path), mode: match[1] });
+    snapshots.push({
+      path,
+      present: true,
+      content: await executor.readFile(path),
+      mode: Number.parseInt(match[1], 8),
+    });
   }
   return snapshots;
 }
@@ -320,8 +325,7 @@ async function restorePersistentDovecotConfig(
     }
     // Contents travel through the executor's file channel, never argv/logs. This
     // matters because the OAuth2 config contains the introspection credential.
-    await executor.writeFile(snapshot.path, snapshot.content);
-    await executor.exec(`chmod ${snapshot.mode} ${sq(snapshot.path)}`);
+    await writeFileWithMode(executor, snapshot.path, snapshot.content, snapshot.mode);
   }
 }
 

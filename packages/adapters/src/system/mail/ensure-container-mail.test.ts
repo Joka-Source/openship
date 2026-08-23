@@ -331,6 +331,7 @@ describe("ensureContainerMail swap", () => {
   ) {
     const files = new Map(Object.entries(original) as [keyof typeof original, FileState][]);
     let launches = 0;
+    let publishedBeforeMode = false;
     const exactOriginal = () =>
       Object.values(dovecotFiles).every((path) => {
         const actual = files.get(path);
@@ -382,14 +383,20 @@ describe("ensureContainerMail swap", () => {
     });
     const writeFile = vi.fn(async (path: string, content: string) => {
       if (!Object.values(dovecotFiles).includes(path as never)) return;
+      publishedBeforeMode = true;
       const previous = files.get(path as keyof typeof original);
       files.set(path as keyof typeof original, { content, mode: previous?.mode ?? "600" });
     });
+    const writeFileWithMode = vi.fn(async (path: string, content: string, mode: number) => {
+      if (!Object.values(dovecotFiles).includes(path as never)) return;
+      files.set(path as keyof typeof original, { content, mode: mode.toString(8) });
+    });
     return {
-      executor: { exec, streamExec, readFile, writeFile } as never,
+      executor: { exec, streamExec, readFile, writeFile, writeFileWithMode } as never,
       files,
       exactOriginal,
       launches: () => launches,
+      publishedBeforeMode: () => publishedBeforeMode,
     };
   }
 
@@ -419,6 +426,7 @@ describe("ensureContainerMail swap", () => {
     expect(box.launches()).toBe(2);
     expect(result).toMatchObject({ updated: false, mailDown: false });
     expect(box.exactOriginal()).toBe(true);
+    expect(box.publishedBeforeMode()).toBe(false);
   });
 
   it("restores files removed by a failed OAuth-disable reconciliation before rollback", async () => {
@@ -451,6 +459,7 @@ describe("ensureContainerMail swap", () => {
     expect(box.launches()).toBe(2);
     expect(result).toMatchObject({ updated: false, mailDown: false });
     expect(box.exactOriginal()).toBe(true);
+    expect(box.publishedBeforeMode()).toBe(false);
   });
 });
 
