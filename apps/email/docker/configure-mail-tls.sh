@@ -19,7 +19,8 @@ live_dir="${tls_root}/live/${mail_domain}"
 public_cert="${live_dir}/fullchain.pem"
 private_key="${live_dir}/privkey.pem"
 
-if [ ! -e "$public_cert" ] && [ ! -e "$private_key" ]; then
+if [ ! -e "$public_cert" ] && [ ! -L "$public_cert" ] \
+  && [ ! -e "$private_key" ] && [ ! -L "$private_key" ]; then
   log "public certificate for ${mail_domain} not issued yet; retaining the baked bootstrap certificate"
   exit 0
 fi

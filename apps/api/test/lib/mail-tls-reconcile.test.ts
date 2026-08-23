@@ -7,6 +7,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +26,9 @@ afterEach(() => {
   }
 });
 
-function fixture(options: { certificate?: boolean; matchingKey?: boolean } = {}) {
+function fixture(
+  options: { certificate?: boolean; danglingLineage?: boolean; matchingKey?: boolean } = {},
+) {
   const root = mkdtempSync(resolve(tmpdir(), "openship-mail-tls-"));
   temporaryDirectories.push(root);
 
@@ -40,7 +43,16 @@ function fixture(options: { certificate?: boolean; matchingKey?: boolean } = {})
   writeFileSync(cert, "prior-certificate\n");
   writeFileSync(key, "prior-private-key\n");
 
-  if (options.certificate) {
+  if (options.danglingLineage) {
+    symlinkSync(
+      resolve(root, "letsencrypt/archive/missing-fullchain.pem"),
+      resolve(live, "fullchain.pem"),
+    );
+    symlinkSync(
+      resolve(root, "letsencrypt/archive/missing-privkey.pem"),
+      resolve(live, "privkey.pem"),
+    );
+  } else if (options.certificate) {
     writeFileSync(resolve(live, "fullchain.pem"), "VALID CERT mail.jjty.in\n");
     writeFileSync(
       resolve(live, "privkey.pem"),
@@ -121,6 +133,15 @@ describe("mail engine TLS reconciliation", () => {
     expect(() => reconcile(paths)).toThrow();
 
     expect(existsSync(paths.cert)).toBe(true);
+    expect(readFileSync(paths.cert, "utf8")).toBe("prior-certificate\n");
+    expect(readFileSync(paths.key, "utf8")).toBe("prior-private-key\n");
+  });
+
+  it("fails closed when a retained Certbot lineage has dangling live symlinks", () => {
+    const paths = fixture({ danglingLineage: true });
+
+    expect(() => reconcile(paths)).toThrow();
+
     expect(readFileSync(paths.cert, "utf8")).toBe("prior-certificate\n");
     expect(readFileSync(paths.key, "utf8")).toBe("prior-private-key\n");
   });
