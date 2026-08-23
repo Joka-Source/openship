@@ -18,6 +18,8 @@ import { ImapFlow } from 'imapflow';
 import { env } from '../env';
 import { getSession } from '../lib/session';
 import { imapClientOptions } from '../lib/imap';
+import { folderToMailbox, normalizeFolderSlug } from '../lib/imap-driver';
+import { bindImapAbort } from '../lib/imap-idle';
 
 export const idleRoute = new Hono();
 
@@ -27,7 +29,8 @@ idleRoute.get('/idle', async (c) => {
   const session = await getSession(sid);
   if (!session) return c.text('Unauthorized', 401);
 
-  const folder = c.req.query('folder') || 'INBOX';
+  const folder = normalizeFolderSlug(c.req.query('folder'));
+  const mailbox = folderToMailbox(folder);
 
   return streamSSE(c, async (stream) => {
     const client = new ImapFlow(
@@ -40,51 +43,33 @@ idleRoute.get('/idle', async (c) => {
           : { pass: session.password! }),
       }),
     );
+    const abortState = bindImapAbort(stream, client);
 
     const send = async (event: string, data: unknown) => {
       await stream.writeSSE({ event, data: JSON.stringify(data) });
     };
 
     const onChange = () => {
-      void send('mailbox', { folder, at: new Date().toISOString() });
+      if (!abortState.aborted) {
+        void send('mailbox', { folder, at: new Date().toISOString() });
+      }
     };
 
     try {
       await client.connect();
-      await client.mailboxOpen(folder);
+      if (abortState.aborted) return;
+      await client.mailboxOpen(mailbox);
+      if (abortState.aborted) return;
       client.on('exists', onChange);
       client.on('expunge', onChange);
       client.on('flags', onChange);
       await client.idle();
-
-      stream.onAbort(async () => {
-        try {
-          await client.logout();
-        } catch {
-          /* ignore */
-        }
-      });
-
-      // Keep the response open until aborted. `idle()` returns when
-      // the IDLE is broken; loop so brief disconnects don't end the
-      // stream.
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        await new Promise((r) => setTimeout(r, 1000 * 60 * 25));
-        try {
-          await client.noop();
-        } catch {
-          break;
-        }
-      }
     } catch (err) {
-      await send('error', { message: (err as Error).message });
-    } finally {
-      try {
-        await client.logout();
-      } catch {
-        /* ignore */
+      if (!abortState.aborted) {
+        await send('error', { message: (err as Error).message });
       }
+    } finally {
+      client.close();
     }
   });
 });

@@ -340,6 +340,42 @@ export function MailLayout() {
   const [{ isFetching, refetch: refetchThreads }] = useThreads();
   const isDesktop = useMediaQuery('(min-width: 768px)');
 
+  // Keep the visible folder fresh from Dovecot's IMAP IDLE notifications. The
+  // thread query deliberately has an infinite stale time to prevent optimistic
+  // UI actions being overwritten by background races, so without this bridge a
+  // newly delivered message would remain invisible until a manual refresh.
+  // A bounded visible-tab poll covers proxies or networks that interrupt SSE.
+  useEffect(() => {
+    if (!session?.user) return;
+
+    let refreshTimer: number | undefined;
+    const refreshVisibleFolder = () => {
+      if (document.visibilityState === 'visible') {
+        void refetchThreads();
+      }
+    };
+    const scheduleRefresh = () => {
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(refreshVisibleFolder, 250);
+    };
+
+    const eventSource = new EventSource(`/mail/idle?folder=${encodeURIComponent(folder)}`, {
+      withCredentials: true,
+    });
+    eventSource.addEventListener('mailbox', scheduleRefresh);
+
+    const fallbackInterval = window.setInterval(refreshVisibleFolder, 30_000);
+    document.addEventListener('visibilitychange', refreshVisibleFolder);
+
+    return () => {
+      eventSource.removeEventListener('mailbox', scheduleRefresh);
+      eventSource.close();
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      window.clearInterval(fallbackInterval);
+      document.removeEventListener('visibilitychange', refreshVisibleFolder);
+    };
+  }, [folder, refetchThreads, session?.user]);
+
   const [threadId] = useQueryState('threadId');
 
   useEffect(() => {
