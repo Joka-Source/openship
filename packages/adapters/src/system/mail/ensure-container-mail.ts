@@ -270,6 +270,61 @@ async function writeEnvFileBody(
 const ENGINE_ENV_FILE = `${MAIL_HOST_STATE_DIR}/engine.env`;
 const DB_ENV_FILE = `${MAIL_HOST_STATE_DIR}/db.env`;
 
+const PERSISTENT_DOVECOT_CONFIG_FILES = [
+  `${MAIL_HOST_STATE_DIR}/config/dovecot/dovecot.conf`,
+  `${MAIL_HOST_STATE_DIR}/config/dovecot/iredmail/90-openship-jtyid-oauth.conf`,
+  `${MAIL_HOST_STATE_DIR}/config/dovecot/dovecot-oauth2.conf.ext`,
+] as const;
+
+type PersistentFileSnapshot =
+  | { path: string; present: false }
+  | { path: string; present: true; content: string; mode: string };
+
+/**
+ * Capture the exact persistent Dovecot files an engine entrypoint may reconcile.
+ * These paths are bind-mounted into `/etc/dovecot`, so a target image that fails
+ * after its config helper or `doveconf` ran leaves its changes on the host.
+ */
+async function snapshotPersistentDovecotConfig(
+  executor: CommandExecutor,
+): Promise<PersistentFileSnapshot[]> {
+  const snapshots: PersistentFileSnapshot[] = [];
+  for (const path of PERSISTENT_DOVECOT_CONFIG_FILES) {
+    const state = (
+      await executor.exec(
+        `if [ -e ${sq(path)} ]; then printf 'opsh_mail_snapshot=present:'; ` +
+          `stat -c '%a' ${sq(path)}; else printf 'opsh_mail_snapshot=absent\\n'; fi`,
+      )
+    ).trim();
+    if (state === "opsh_mail_snapshot=absent") {
+      snapshots.push({ path, present: false });
+      continue;
+    }
+    const match = /^opsh_mail_snapshot=present:([0-7]{3,4})$/.exec(state);
+    if (!match) {
+      throw new Error(`Could not snapshot persistent Dovecot file metadata for ${path}.`);
+    }
+    snapshots.push({ path, present: true, content: await executor.readFile(path), mode: match[1] });
+  }
+  return snapshots;
+}
+
+async function restorePersistentDovecotConfig(
+  executor: CommandExecutor,
+  snapshots: readonly PersistentFileSnapshot[],
+): Promise<void> {
+  for (const snapshot of snapshots) {
+    if (!snapshot.present) {
+      await executor.exec(`rm -f ${sq(snapshot.path)}`);
+      continue;
+    }
+    // Contents travel through the executor's file channel, never argv/logs. This
+    // matters because the OAuth2 config contains the introspection credential.
+    await executor.writeFile(snapshot.path, snapshot.content);
+    await executor.exec(`chmod ${snapshot.mode} ${sq(snapshot.path)}`);
+  }
+}
+
 /**
  * Hand a secret env-file to the account that runs `docker`, and make sure it can reach it.
  *
@@ -569,9 +624,11 @@ export async function ensureContainerMail(
   const current = await containerImageRef(executor, container);
   if (current) {
     let originalEngineEnv: string | undefined;
+    let mergedEngineEnv: string | undefined;
     let managedEnvChanged = false;
+    let hostState: CommandExecutor | undefined;
     if (MANAGED_ENGINE_ENV_KEYS.some((key) => opts.secrets[key] !== undefined)) {
-      const hostState = await rootOrDegrade(executor, {
+      hostState = await rootOrDegrade(executor, {
         purpose: "Updating the mail engine's JTYID OAuth settings",
         consequence: "The engine stays on its current image and authentication settings.",
         report: (message) => onLog(log(message, "warn")),
@@ -579,16 +636,28 @@ export async function ensureContainerMail(
       originalEngineEnv = await hostState.readFile(ENGINE_ENV_FILE);
       const merged = mergeManagedEngineEnv(originalEngineEnv, opts.secrets);
       managedEnvChanged = merged.changed;
-      if (managedEnvChanged) {
-        // ElevatedExecutor publishes through a private staging directory and atomic rename;
-        // neither the secret nor the complete env-file ever appears in argv or logs.
-        await writeEnvFileBody(hostState, ENGINE_ENV_FILE, merged.body);
-        await handOverEnvFile(executor, ENGINE_ENV_FILE, onLog);
-      }
+      mergedEngineEnv = merged.body;
     }
 
     if (current === image && !managedEnvChanged) {
       return { container, dbContainer, image, updated: false };
+    }
+
+    const persistentHostState =
+      hostState ??
+      (await rootOrDegrade(executor, {
+        purpose: "Snapshotting the mail engine's persistent Dovecot settings",
+        consequence: "The engine stays on its current image and authentication settings.",
+        report: (message) => onLog(log(message, "warn")),
+      }));
+    const dovecotSnapshot = await snapshotPersistentDovecotConfig(persistentHostState);
+
+    if (managedEnvChanged && mergedEngineEnv !== undefined) {
+      // ElevatedExecutor publishes through a private staging directory and atomic rename;
+      // neither the secret nor the complete env-file ever appears in argv or logs. Wait
+      // until the Dovecot snapshot exists so every persistent mutation is recoverable.
+      await writeEnvFileBody(persistentHostState, ENGINE_ENV_FILE, mergedEngineEnv);
+      await handOverEnvFile(executor, ENGINE_ENV_FILE, onLog);
     }
 
     // The `engine.env` this swap launches against was written by a PREVIOUS install, so on
@@ -602,23 +671,23 @@ export async function ensureContainerMail(
     const startEngineImage = makeMailStart(executor, container, opts);
     const restoreOriginalEngineEnv = async (): Promise<void> => {
       if (!managedEnvChanged || originalEngineEnv === undefined) return;
-      const hostState = await rootOrDegrade(executor, {
-        purpose: "Rolling back the mail engine's JTYID OAuth settings",
-        consequence: "The mail engine may retain settings that were not applied.",
-        report: (message) => onLog(log(message, "warn")),
-      });
-      await writeEnvFileBody(hostState, ENGINE_ENV_FILE, originalEngineEnv);
+      await writeEnvFileBody(persistentHostState, ENGINE_ENV_FILE, originalEngineEnv);
       await handOverEnvFile(executor, ENGINE_ENV_FILE, onLog);
+    };
+    const restoreOriginalPersistentState = async (): Promise<void> => {
+      await restorePersistentDovecotConfig(persistentHostState, dovecotSnapshot);
+      await restoreOriginalEngineEnv();
     };
     let startAttempt = 0;
     const start = async (candidate: string): Promise<boolean> => {
       startAttempt += 1;
       // `swapManagedImage` calls the start callback a second time only for rollback.
-      // Put back the exact previous env before that attempt, so a bad/rotated OAuth
-      // credential cannot take password mail down along with the failed new config.
-      if (startAttempt > 1 && managedEnvChanged && originalEngineEnv !== undefined) {
+      // Put back the exact previous env AND all persistent Dovecot files before that
+      // attempt. The failed target's entrypoint may already have reconciled these
+      // bind-mounted files before doveconf rejected the resulting configuration.
+      if (startAttempt > 1) {
         try {
-          await restoreOriginalEngineEnv();
+          await restoreOriginalPersistentState();
         } catch (err) {
           onLog(
             log(
