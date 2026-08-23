@@ -81,6 +81,33 @@ function reconcile(version: "2.3" | "2.4", paths: ReturnType<typeof fixture>, se
 }
 
 describe("Dovecot JTYID OAuth configuration", () => {
+  it("patches the Dovecot 2.3 PostgreSQL ioloop defect and exercises the real auth process", () => {
+    const dockerfile = readFileSync(resolve(repoRoot, "apps/email/Dockerfile"), "utf8");
+    const upstreamPatch = readFileSync(
+      resolve(repoRoot, "apps/email/docker/patches/dovecot-2.3-pgsql-oauth-ioloop.patch"),
+      "utf8",
+    );
+    const runtimeVerifier = readFileSync(
+      resolve(repoRoot, "apps/email/docker/verify-dovecot-pgsql-oauth-runtime.sh"),
+      "utf8",
+    );
+
+    expect(upstreamPatch).toContain("Upstream-Commit: 2340275fade3af92792cd4303b8fc5945ed9d7c7");
+    expect(upstreamPatch).toContain("db->orig_ioloop = current_ioloop;");
+    expect(upstreamPatch).toContain("io_loop_set_current(db->orig_ioloop);");
+    expect(dockerfile).toContain("AS dovecot-pgsql-builder");
+    expect(dockerfile).toContain("dovecot-2.3-pgsql-oauth-ioloop.patch");
+    expect(dockerfile).toContain("dovecot-pgsql_*.deb");
+    expect(dockerfile).toContain("dpkg-query -W -f='${Version}' dovecot-core");
+    expect(dockerfile).toContain('test "$installed_version" = "$patched_version"');
+    expect(dockerfile).toContain("verify-dovecot-pgsql-oauth-runtime.sh");
+    expect(runtimeVerifier).toContain("driver = pgsql");
+    expect(runtimeVerifier).toContain("driver = oauth2");
+    expect(runtimeVerifier).toContain("AUTH=XOAUTH2");
+    expect(runtimeVerifier).toContain("AUTH=OAUTHBEARER");
+    expect(runtimeVerifier).toContain("Auth process broken");
+  });
+
   it("passes the executable 2.3/current and 2.4 sample and generator contract", () => {
     const verifier = resolve(repoRoot, "apps/email/docker/verify-dovecot-oauth-config.sh");
 

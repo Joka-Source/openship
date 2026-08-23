@@ -1,0 +1,16 @@
+Description: preserve the PostgreSQL driver's original ioloop during synchronous waits
+ The Debian 12 Dovecot 2.3.19.1 driver leaves orig_ioloop unset while the
+ OAuth2 passdb has a live HTTP client. Starting auth then switches away from
+ the OAuth client's ioloop and aborts on http_client_context_close().
+Origin: upstream, https://github.com/dovecot/core/commit/2340275fade3af92792cd4303b8fc5945ed9d7c7
+Upstream-Commit: 2340275fade3af92792cd4303b8fc5945ed9d7c7
+Bug: https://dovecot.org/mailman3/hyperkitty/list/dovecot@dovecot.org/thread/WNVZVQ3OKDHRTBVZXHKIRS5MZMXR4TJC/
+Last-Update: 2026-08-23
+--- a/src/lib-sql/driver-pgsql.c
++++ b/src/lib-sql/driver-pgsql.c
+@@ -1275 +1275 @@ static void driver_pgsql_wait(struct sql_db *_db)
+-	struct ioloop *prev_ioloop = current_ioloop;
++	db->orig_ioloop = current_ioloop;
+@@ -1281 +1281 @@ static void driver_pgsql_wait(struct sql_db *_db)
+-	io_loop_set_current(prev_ioloop);
++	io_loop_set_current(db->orig_ioloop);

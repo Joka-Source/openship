@@ -25,6 +25,39 @@
 # Without this the installer exited early, `|| true` swallowed it, and the image
 # shipped with NO mail stack (all tags byte-identical ~192MB, nothing on :25).
 # ─────────────────────────────────────────────────────────────────────────────
+FROM debian:12-slim AS dovecot-pgsql-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG DOVECOT_DEBIAN_VERSION=1:2.3.19.1+dfsg1-2.1+deb12u6
+
+COPY apps/email/docker/patches/dovecot-2.3-pgsql-oauth-ioloop.patch /tmp/dovecot-pgsql-oauth-ioloop.patch
+
+RUN printf '%s\n' \
+      'Types: deb-src' \
+      'URIs: http://deb.debian.org/debian' \
+      'Suites: bookworm bookworm-updates' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      '' \
+      'Types: deb-src' \
+      'URIs: http://deb.debian.org/debian-security' \
+      'Suites: bookworm-security' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      > /etc/apt/sources.list.d/debian-src.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates devscripts dpkg-dev \
+    && apt-get build-dep -y dovecot="$DOVECOT_DEBIAN_VERSION" \
+    && install -d /build \
+    && cd /build \
+    && apt-get source dovecot="$DOVECOT_DEBIAN_VERSION" \
+    && source_dir=$(find /build -mindepth 1 -maxdepth 1 -type d -name 'dovecot-*' -print -quit) \
+    && test -n "$source_dir" \
+    && patch --batch --fuzz=0 -d "$source_dir" -p1 < /tmp/dovecot-pgsql-oauth-ioloop.patch \
+    && cd "$source_dir" \
+    && DEB_BUILD_OPTIONS=nocheck DEB_BUILD_PROFILES=noudeb dpkg-buildpackage -b -uc -us -j2 \
+    && test "$(find /build -maxdepth 1 -type f -name 'dovecot-pgsql_*.deb' | wc -l)" = 1
+
 FROM debian:12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -95,6 +128,19 @@ RUN cp /opt/openship-mail/build-config /opt/iRedMail-engine/config \
        bash iRedMail.sh || true \
     && rm -f /opt/iRedMail-engine/config \
     && rm -rf /var/lib/apt/lists/*
+
+# Debian 12's Dovecot 2.3.19.1 aborts its auth process when the PostgreSQL
+# password passdb and OAuth2 passdb coexist. Rebuild only the PostgreSQL driver
+# from the exact Debian source with upstream commit 2340275f, then prove the
+# real auth process survives the formerly crashing combination before the image
+# can be published.
+COPY --from=dovecot-pgsql-builder /build/dovecot-pgsql_*.deb /tmp/dovecot-pgsql-patched.deb
+RUN installed_version=$(dpkg-query -W -f='${Version}' dovecot-core) \
+    && patched_version=$(dpkg-deb -f /tmp/dovecot-pgsql-patched.deb Version) \
+    && test "$installed_version" = "$patched_version" \
+    && dpkg -i /tmp/dovecot-pgsql-patched.deb \
+    && rm -f /tmp/dovecot-pgsql-patched.deb \
+    && bash /opt/openship-mail/verify-dovecot-pgsql-oauth-runtime.sh
 
 # Smoke test — the build FAILS here if the mail stack didn't actually install.
 # Every path below is a program supervisord launches at runtime (supervisord.conf);
