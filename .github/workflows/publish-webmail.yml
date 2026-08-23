@@ -79,7 +79,6 @@ jobs:
         id: image
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-        env:
           IMAGE_NAME: ${{ matrix.image }}
         run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME:jtyid-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
