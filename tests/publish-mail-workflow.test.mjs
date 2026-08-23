@@ -12,6 +12,12 @@ test("mail publisher uses native architecture runners and assembles one immutabl
   assert.match(workflow, /runner: ubuntu-24\.04-arm\n\s+platform: linux\/arm64\n\s+arch: arm64/);
   assert.match(workflow, /runs-on: \$\{\{ matrix\.runner \}\}/);
   assert.match(workflow, /platforms: \$\{\{ matrix\.platform \}\}/);
+  assert.match(workflow, /name=ghcr\.io\/\$\{GITHUB_REPOSITORY_OWNER,,\}\/openship-\$IMAGE_NAME/);
+  assert.match(
+    workflow,
+    /outputs: type=image,name=\$\{\{ steps\.repository\.outputs\.name \}\},push-by-digest=true,name-canonical=true,push=true/,
+  );
+  assert.doesNotMatch(workflow, /name=ghcr\.io\/\$\{\{ github\.repository_owner \}\}/);
   assert.match(workflow, /push-by-digest=true,name-canonical=true,push=true/);
   assert.match(workflow, /steps\.build\.outputs\.digest/);
   assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
