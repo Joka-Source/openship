@@ -1,4 +1,4 @@
-name: Publish webmail image
+name: Publish mail images
 
 # Bootstrap publisher for reviewed webmail commits that are not yet on the
 # default branch. The workflow itself remains default-branch controlled; the
@@ -16,12 +16,12 @@ permissions:
   packages: write
 
 concurrency:
-  group: publish-webmail-${{ inputs.source_sha }}
+  group: publish-mail-images-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Build and publish immutable webmail image
+    name: Build and publish ${{ matrix.image }} image
     if: >-
       github.ref == 'refs/heads/main' &&
       github.event.repository.full_name == 'Joka-Source/openship' &&
@@ -31,6 +31,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: webmail-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mail
+            dockerfile: apps/email/Dockerfile
+          - image: webmail
+            dockerfile: apps/email/Dockerfile.webmail
     steps:
       - name: Validate requested revision
         env:
@@ -71,35 +79,38 @@ jobs:
         id: image
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-webmail:jtyid-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME:jtyid-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: apps/email/Dockerfile.webmail
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.image.outputs.ref }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.source_sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=openship-webmail
-          cache-to: type=gha,mode=max,scope=openship-webmail
+          cache-from: type=gha,scope=openship-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=openship-${{ matrix.image }}
 
       - name: Record immutable receipt
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ matrix.image }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           test -n "$IMAGE_DIGEST"
           {
-            echo "### Webmail image"
+            echo "### OpenShip $IMAGE_NAME image"
             echo "- Source: \`$SOURCE_SHA\`"
             echo "- Provenance tag: \`$IMAGE_REF\`"
             echo "- Digest: \`$IMAGE_DIGEST\`"
-            echo "- Immutable ref: \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-webmail@$IMAGE_DIGEST\`"
+            echo "- Immutable ref: \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openship-$IMAGE_NAME@$IMAGE_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
