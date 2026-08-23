@@ -156,6 +156,7 @@ RUN mkdir -p /opt/openship-mail/seed \
     && cp -a /etc/dovecot       /opt/openship-mail/seed/dovecot      2>/dev/null || true \
     && cp -a /etc/amavis/conf.d /opt/openship-mail/seed/amavis-confd 2>/dev/null || true \
     && chmod +x /opt/openship-mail/entrypoint.sh \
+                /opt/openship-mail/configure-mail-tls.sh \
                 /opt/openship-mail/configure-dovecot-jtyid-oauth.sh \
                 /opt/openship-mail/verify-dovecot-oauth-config.sh
 
