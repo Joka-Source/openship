@@ -28,4 +28,9 @@ export AMAVISD_DB_PASSWD='build-placeholder'
 export IREDAPD_DB_PASSWD='build-placeholder'
 export FAIL2BAN_DB_PASSWD='build-placeholder'
 export PGSQL_ROOT_PASSWD='build-placeholder'
+# JTYID's Dovecot introspection client is runtime-only. This distinct marker must
+# not be consumed by entrypoint.sh's database-password reconciliation.
+export JTYID_DOVECOT_INTROSPECTION_CLIENT_ID='openship-mail-dovecot'
+export JTYID_DOVECOT_INTROSPECTION_SECRET='jtyid-introspection-secret-placeholder'
+export JTYID_DOVECOT_INTROSPECTION_URL='https://id.jjty.in/application/o/introspect/'
 #EOF

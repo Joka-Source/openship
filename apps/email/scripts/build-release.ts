@@ -202,8 +202,7 @@ const ROOT_PACKAGE_JSON = {
   name: '@zero/dist',
   version: '0.0.0',
   private: true,
-  description:
-    'Self-contained Zero webmail release. Run `bun install && bun start`.',
+  description: 'Self-contained Zero webmail release. Run `bun install && bun start`.',
   type: 'module',
   scripts: {
     /**
@@ -241,8 +240,8 @@ front to terminate TLS and route public traffic to it.
 
 | Variable                | Purpose                                            |
 | ----------------------- | -------------------------------------------------- |
-| \`BETTER_AUTH_SECRET\`    | Cookie encryption key (long random string)         |
-| \`COOKIE_DOMAIN\`         | Cookie domain (or omit for host-only)              |
+| \`SESSION_ENCRYPTION_KEY\` | AES-256-GCM key for password and OAuth session data |
+| \`BRANDING_ADMIN_TOKEN\`   | Protected OpenShip-to-webmail branding credential   |
 
 > The client reads its backend URL from \`window.location.origin\` at
 > runtime - no build-time URL baking, no env required. One dist
@@ -260,6 +259,10 @@ front to terminate TLS and route public traffic to it.
 | \`BRANDING_PATH\`      | \`./data/branding\`        | Where branding lives on disk  |
 | \`SQLITE_PATH\`        | \`./data/zero.db\`         | Session DB                    |
 | \`IMAP_DEBUG\`         | unset                    | Verbose IMAP per-op timings   |
+| \`PUBLIC_URL\`         | \`http://localhost:3030\` | Public origin used for the exact OIDC callback |
+| \`JTYID_OIDC_CLIENT_SECRET\` | unset                | Enables confidential JTYID SSO; runtime-only, never bake into the image |
+| \`JTYID_OIDC_ISSUER\`  | \`https://id.jjty.in/application/o/openship-mail/\` | Exact JTYID issuer |
+| \`JTYID_OIDC_CLIENT_ID\` | \`openship-mail\`       | Dedicated JTYID client id     |
 
 ## What's in the dist
 
@@ -390,9 +393,12 @@ async function main() {
   await step('generating dist/server/bun.lock (standalone, no workspace refs)', async () => {
     await run('bun install', join(DIST, 'server'));
   });
-  await step('removing dist/server/node_modules (deps install on deploy from lockfile)', async () => {
-    await rm(join(DIST, 'server', 'node_modules'), { recursive: true, force: true });
-  });
+  await step(
+    'removing dist/server/node_modules (deps install on deploy from lockfile)',
+    async () => {
+      await rm(join(DIST, 'server', 'node_modules'), { recursive: true, force: true });
+    },
+  );
 
   // 6. Top-level dist orchestration files.
   await step('writing dist/package.json + start.sh + README.md', async () => {

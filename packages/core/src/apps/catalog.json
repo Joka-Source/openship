@@ -3843,7 +3843,8 @@
             "webmail_data:/data"
           ],
           "environment": {
-            "TRUSTED_ORIGINS": "{{publicUrl:webmail}}"
+            "TRUSTED_ORIGINS": "{{publicUrl:webmail}}",
+            "PUBLIC_URL": "{{publicUrl:webmail}}"
           },
           "restart": "unless-stopped"
         }
@@ -3863,6 +3864,14 @@
           "label": "Branding admin token",
           "help": "Auto-generated. Lets Openship write this webmail's white-label login page (logo, name, colors) over its admin API. Nothing else accepts it.",
           "generate": "secret",
+          "secret": true
+        },
+        {
+          "key": "JTYID_OIDC_CLIENT_SECRET",
+          "service": "webmail",
+          "label": "JTYID OIDC client secret",
+          "help": "Confidential-client secret registered for this webmail callback. Stored only as protected runtime environment; omit to keep password-only login.",
+          "type": "password",
           "secret": true
         }
       ],

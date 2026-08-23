@@ -35,6 +35,13 @@ export function dirOf(path: string): string {
   return idx === 0 ? "/" : path.slice(0, idx);
 }
 
+function renderFileMode(mode: number): string {
+  if (!Number.isInteger(mode) || mode < 0 || mode > 0o7777) {
+    throw new Error(`Invalid file mode: ${mode}.`);
+  }
+  return mode.toString(8).padStart(3, "0");
+}
+
 /**
  * Decorate a CommandExecutor so every privileged operation runs through
  * `sudo -n`. Construct this ONLY for a target that is non-root WITH passwordless
@@ -106,19 +113,25 @@ export function elevatedExecutor(inner: CommandExecutor): CommandExecutor {
    * `chown 0:0` before the move because `mv` PRESERVES ownership, both by rename and by
    * cross-device copy: the published file was landing under /etc owned by the login user,
    * so on exactly the hosts this decorator exists for, a non-root account could rewrite
-   * root's nginx.conf after we wrote it. The mode is deliberately left alone — callers
-   * needing tighter than the default chmod the staged path themselves (`nginx.ts`
-   * `_writeFile`), and forcing one here would silently loosen theirs.
+   * root's nginx.conf after we wrote it. Plain `writeFile` deliberately retains its
+   * historical mode; the mode-aware entrypoint below chmods inside this private stage
+   * before the publish move, without silently changing unrelated callers.
    */
-  const writeFileElevated = async (path: string, content: string): Promise<void> => {
+  const writeFileElevated = async (
+    path: string,
+    content: string,
+    mode?: number,
+  ): Promise<void> => {
     const stage = `/tmp/.openship-elev-${randomBytes(12).toString("hex")}`;
     await inner.exec(`mkdir -m 700 ${sq(stage)}`);
     try {
       const staged = `${stage}/payload`;
       await inner.writeFile(staged, content);
+      const modeStep = mode === undefined ? "" : ` && chmod ${renderFileMode(mode)} ${sq(staged)}`;
       await inner.exec(
         elevateCommand(
-          `mkdir -p ${sq(dirOf(path))} && chown 0:0 ${sq(staged)} && mv -f ${sq(staged)} ${sq(path)}`,
+          `mkdir -p ${sq(dirOf(path))} && chown 0:0 ${sq(staged)}` +
+            `${modeStep} && mv -f ${sq(staged)} ${sq(path)}`,
         ),
       );
     } finally {
@@ -135,6 +148,8 @@ export function elevatedExecutor(inner: CommandExecutor): CommandExecutor {
     streamExec: (command: string, onLog: (log: LogEntry) => void, opts?: { signal?: AbortSignal }) =>
       inner.streamExec(elevateCommand(command), onLog, opts),
     writeFile: writeFileElevated,
+    writeFileWithMode: (path: string, content: string, mode: number) =>
+      writeFileElevated(path, content, mode),
     readFile: readFileElevated,
     exists: existsElevated,
     // Elevated for the same reason as writeFile: the vhost/conf dirs are root-owned,
@@ -163,6 +178,37 @@ export function elevatedExecutor(inner: CommandExecutor): CommandExecutor {
       return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
     },
   });
+}
+
+/**
+ * Publish a file atomically with its final mode already applied while it is still
+ * inside a private 0700 staging directory. The destination therefore never exposes
+ * normal-umask bytes, and a failed chmod leaves the previous destination untouched.
+ */
+export async function writeFileWithMode(
+  executor: CommandExecutor,
+  path: string,
+  content: string,
+  mode: number,
+): Promise<void> {
+  if (executor.writeFileWithMode) {
+    await executor.writeFileWithMode(path, content, mode);
+    return;
+  }
+
+  const renderedMode = renderFileMode(mode);
+  const stage = `/tmp/.openship-mode-${randomBytes(12).toString("hex")}`;
+  await executor.exec(`mkdir -m 700 ${sq(stage)}`);
+  try {
+    const staged = `${stage}/payload`;
+    await executor.writeFile(staged, content);
+    await executor.exec(
+      `chmod ${renderedMode} ${sq(staged)} && mkdir -p ${sq(dirOf(path))} && ` +
+        `mv -f ${sq(staged)} ${sq(path)}`,
+    );
+  } finally {
+    await executor.exec(`rm -rf ${sq(stage)}`).catch(() => undefined);
+  }
 }
 
 /**

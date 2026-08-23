@@ -85,6 +85,16 @@ export interface Env {
   SESSION_COOKIE_NAME: string;
   SESSION_TTL_SECONDS: number;
 
+  PUBLIC_URL: string;
+  JTYID_OIDC_ISSUER: string;
+  JTYID_OIDC_CLIENT_ID: string;
+  JTYID_OIDC_CLIENT_SECRET: string | undefined;
+  JTYID_OIDC_AUTHORIZATION_ENDPOINT: string;
+  JTYID_OIDC_TOKEN_ENDPOINT: string;
+  JTYID_OIDC_USERINFO_ENDPOINT: string;
+  JTYID_OIDC_JWKS_URI: string;
+  JTYID_OIDC_REVOCATION_ENDPOINT: string;
+
   DEFAULT_IMAP_HOST: string | undefined;
   DEFAULT_IMAP_PORT: number;
   DEFAULT_SMTP_HOST: string | undefined;
@@ -128,6 +138,34 @@ export const env: Env = {
   SESSION_ENCRYPTION_KEY: required('SESSION_ENCRYPTION_KEY'),
   SESSION_COOKIE_NAME: optional('SESSION_COOKIE_NAME', 'zero_session'),
   SESSION_TTL_SECONDS: int('SESSION_TTL_SECONDS', 60 * 60 * 24 * 30),
+
+  PUBLIC_URL: optional('PUBLIC_URL', 'http://localhost:3030').replace(/\/+$/, ''),
+  JTYID_OIDC_ISSUER: optional(
+    'JTYID_OIDC_ISSUER',
+    'https://id.jjty.in/application/o/openship-mail/',
+  ),
+  JTYID_OIDC_CLIENT_ID: optional('JTYID_OIDC_CLIENT_ID', 'openship-mail'),
+  JTYID_OIDC_CLIENT_SECRET: process.env.JTYID_OIDC_CLIENT_SECRET,
+  JTYID_OIDC_AUTHORIZATION_ENDPOINT: optional(
+    'JTYID_OIDC_AUTHORIZATION_ENDPOINT',
+    'https://id.jjty.in/application/o/authorize/',
+  ),
+  JTYID_OIDC_TOKEN_ENDPOINT: optional(
+    'JTYID_OIDC_TOKEN_ENDPOINT',
+    'https://id.jjty.in/application/o/token/',
+  ),
+  JTYID_OIDC_USERINFO_ENDPOINT: optional(
+    'JTYID_OIDC_USERINFO_ENDPOINT',
+    'https://id.jjty.in/application/o/userinfo/',
+  ),
+  JTYID_OIDC_JWKS_URI: optional(
+    'JTYID_OIDC_JWKS_URI',
+    'https://id.jjty.in/application/o/openship-mail/jwks/',
+  ),
+  JTYID_OIDC_REVOCATION_ENDPOINT: optional(
+    'JTYID_OIDC_REVOCATION_ENDPOINT',
+    'https://id.jjty.in/application/o/revoke/',
+  ),
 
   DEFAULT_IMAP_HOST: process.env.DEFAULT_IMAP_HOST,
   DEFAULT_IMAP_PORT: int('DEFAULT_IMAP_PORT', 993),

@@ -12,7 +12,20 @@ export interface SmtpAuth {
   host: string;
   port: number;
   user: string;
-  pass: string;
+  pass?: string;
+  accessToken?: string;
+}
+
+export function smtpTransportOptions(auth: SmtpAuth) {
+  return {
+    host: auth.host,
+    port: auth.port,
+    secure: auth.port === 465,
+    requireTLS: auth.port !== 465,
+    auth: auth.accessToken
+      ? { type: 'OAuth2' as const, user: auth.user, accessToken: auth.accessToken }
+      : { user: auth.user, pass: auth.pass ?? '' },
+  };
 }
 
 export interface SendInput {
@@ -29,20 +42,13 @@ export interface SendInput {
   attachments?: Mail.Attachment[];
 }
 
-export async function sendMail(
-  auth: SmtpAuth,
-  input: SendInput,
-): Promise<{ messageId: string }> {
+export async function sendMail(auth: SmtpAuth, input: SendInput): Promise<{ messageId: string }> {
   const transporter = nodemailer.createTransport({
-    host: auth.host,
-    port: auth.port,
-    secure: auth.port === 465,
+    ...smtpTransportOptions(auth),
     // Non-465 submission is STARTTLS, and nodemailer's default is to UPGRADE
     // opportunistically — so a host that doesn't advertise STARTTLS (or a
     // downgrade in front of it) gets the mailbox password in cleartext. Every
     // real submission host supports it; refusing to send is the right failure.
-    requireTLS: auth.port !== 465,
-    auth: { user: auth.user, pass: auth.pass },
   });
 
   try {

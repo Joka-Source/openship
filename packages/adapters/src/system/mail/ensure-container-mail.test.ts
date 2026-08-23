@@ -161,6 +161,7 @@ describe("ensureContainerMail swap", () => {
     const exec = vi.fn(async (cmd: string) => {
       // Engine is running on an OLDER tag → stale vs the pinned ref.
       if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("opsh_mail_snapshot=")) return "opsh_mail_snapshot=absent\n";
       // The pinned tag is already present locally (deliver shipped it) → no pull.
       if (cmd.includes("docker image inspect")) return "sha256:present\n";
       if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
@@ -178,6 +179,287 @@ describe("ensureContainerMail swap", () => {
     // Swapped in place — a new engine `docker run`, and no pull (tag already present).
     expect(cmds.some((c) => c.includes("docker run") && c.includes("--network host"))).toBe(true);
     expect(cmds.some((c) => c.startsWith("docker pull"))).toBe(false);
+  });
+
+  it("merges only the managed JTYID OAuth settings into the retained engine env before swapping", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const existing = [
+      "FIRST_DOMAIN=example.com",
+      "VMAIL_DB_PASSWORD=keep-this-password",
+      "JTYID_DOVECOT_INTROSPECTION_SECRET=old-secret",
+      "",
+    ].join("\n");
+    const writeFile = vi.fn(async (_path: string, _content: string) => {});
+    const readFile = vi.fn(async (path: string) => {
+      if (path.endsWith("engine.env")) return existing;
+      throw new Error("ENOENT");
+    });
+    const streamExec = vi.fn(async (_cmd: string) => ({ code: 0, output: "" }));
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("opsh_mail_snapshot=")) return "opsh_mail_snapshot=absent\n";
+      if (cmd.includes("docker image inspect")) return "sha256:present\n";
+      if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
+      return "";
+    });
+    const executor = { exec, streamExec, writeFile, readFile } as never;
+
+    const result = await ensureContainerMail(executor, {
+      domain: "example.com",
+      secrets: {
+        JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: "openship-mail-dovecot",
+        JTYID_DOVECOT_INTROSPECTION_SECRET: "rotated-secret",
+        JTYID_DOVECOT_INTROSPECTION_URL: "https://id.jjty.in/application/o/introspect/",
+        UNRELATED_NEW_SETTING: "must-not-be-added-during-a-swap",
+      },
+      onLog: () => {},
+    });
+
+    expect(result.updated).toBe(true);
+    const engineWrite = writeFile.mock.calls.find(([path]) => String(path).endsWith("engine.env"));
+    expect(engineWrite).toBeDefined();
+    const body = String(engineWrite?.[1]);
+    expect(body).toContain("FIRST_DOMAIN=example.com\n");
+    expect(body).toContain("VMAIL_DB_PASSWORD=keep-this-password\n");
+    expect(body).toContain("JTYID_DOVECOT_INTROSPECTION_CLIENT_ID=openship-mail-dovecot\n");
+    expect(body).toContain("JTYID_DOVECOT_INTROSPECTION_SECRET=rotated-secret\n");
+    expect(body).toContain(
+      "JTYID_DOVECOT_INTROSPECTION_URL=https://id.jjty.in/application/o/introspect/\n",
+    );
+    expect(body).not.toContain("old-secret");
+    expect(body).not.toContain("UNRELATED_NEW_SETTING");
+    expect(exec.mock.calls.map(([command]) => String(command)).join("\n")).not.toContain(
+      "rotated-secret",
+    );
+    expect(streamExec.mock.calls.map(([command]) => String(command)).join("\n")).not.toContain(
+      "rotated-secret",
+    );
+  });
+
+  it("restores the exact prior engine env before rollback when the OAuth-enabled start fails", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const existing =
+      "FIRST_DOMAIN=example.com\nJTYID_DOVECOT_INTROSPECTION_SECRET=previous-secret\n";
+    const writes: string[] = [];
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      if (path.endsWith("engine.env")) writes.push(content);
+    });
+    const readFile = vi.fn(async () => existing);
+    let launches = 0;
+    const streamExec = vi.fn(async (cmd: string) => {
+      if (cmd.includes("docker run") && cmd.includes("--network host")) {
+        launches += 1;
+        return { code: launches === 1 ? 1 : 0, output: "" };
+      }
+      return { code: 0, output: "" };
+    });
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("opsh_mail_snapshot=")) return "opsh_mail_snapshot=absent\n";
+      if (cmd.includes("docker image inspect")) return "sha256:present\n";
+      if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
+      return "";
+    });
+    const executor = { exec, streamExec, writeFile, readFile } as never;
+
+    const result = await ensureContainerMail(executor, {
+      domain: "example.com",
+      secrets: {
+        JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: "openship-mail-dovecot",
+        JTYID_DOVECOT_INTROSPECTION_SECRET: "rejected-secret",
+        JTYID_DOVECOT_INTROSPECTION_URL: "https://id.jjty.in/application/o/introspect/",
+      },
+      onLog: () => {},
+    });
+
+    expect(result.updated).toBe(false);
+    expect(result.mailDown).toBe(false);
+    expect(launches).toBe(2);
+    expect(writes.at(-1)).toBe(existing);
+  });
+
+  it("restores the prior engine env when image acquisition fails before any start attempt", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const existing = "FIRST_DOMAIN=example.com\n";
+    const writes: string[] = [];
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      if (path.endsWith("engine.env")) writes.push(content);
+    });
+    const readFile = vi.fn(async () => existing);
+    const streamExec = vi.fn(async (cmd: string) => ({
+      code: cmd.startsWith("docker pull") ? 1 : 0,
+      output: "",
+    }));
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("opsh_mail_snapshot=")) return "opsh_mail_snapshot=absent\n";
+      if (cmd.includes("docker image inspect")) return "";
+      return "";
+    });
+    const executor = { exec, streamExec, writeFile, readFile } as never;
+
+    const result = await ensureContainerMail(executor, {
+      domain: "example.com",
+      secrets: {
+        JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: "openship-mail-dovecot",
+        JTYID_DOVECOT_INTROSPECTION_SECRET: "new-secret",
+        JTYID_DOVECOT_INTROSPECTION_URL: "https://id.jjty.in/application/o/introspect/",
+      },
+      onLog: () => {},
+    });
+
+    expect(result.updated).toBe(false);
+    expect(writes.at(-1)).toBe(existing);
+    expect(streamExec.mock.calls.some(([cmd]) => String(cmd).includes("--network host"))).toBe(
+      false,
+    );
+  });
+
+  const dovecotFiles = {
+    main: `${MAIL_HOST_STATE_DIR}/config/dovecot/dovecot.conf`,
+    managed: `${MAIL_HOST_STATE_DIR}/config/dovecot/iredmail/90-openship-jtyid-oauth.conf`,
+    oauth2: `${MAIL_HOST_STATE_DIR}/config/dovecot/dovecot-oauth2.conf.ext`,
+  } as const;
+
+  type FileState = { content: string; mode: string };
+
+  function rollbackDovecotExecutor(
+    original: Partial<Record<(typeof dovecotFiles)[keyof typeof dovecotFiles], FileState>>,
+    reconcile: (
+      files: Map<(typeof dovecotFiles)[keyof typeof dovecotFiles], FileState>,
+    ) => void,
+  ) {
+    const files = new Map(Object.entries(original) as [keyof typeof original, FileState][]);
+    let launches = 0;
+    let publishedBeforeMode = false;
+    const exactOriginal = () =>
+      Object.values(dovecotFiles).every((path) => {
+        const actual = files.get(path);
+        const expected = original[path];
+        return expected
+          ? actual?.content === expected.content && actual.mode === expected.mode
+          : actual === undefined;
+      });
+    const streamExec = vi.fn(async (cmd: string) => {
+      if (cmd.includes("docker run") && cmd.includes("--network host")) {
+        launches += 1;
+        if (launches === 1) {
+          reconcile(files);
+          return { code: 1, output: "" };
+        }
+        return { code: exactOriginal() ? 0 : 1, output: "" };
+      }
+      return { code: 0, output: "" };
+    });
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      if (cmd.includes("docker image inspect")) return "sha256:present\n";
+      if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
+      if (cmd.includes("opsh_mail_snapshot=")) {
+        const path = Object.values(dovecotFiles).find((candidate) =>
+          cmd.includes(`'${candidate}'`),
+        );
+        if (!path) throw new Error(`unexpected snapshot probe: ${cmd}`);
+        const file = files.get(path);
+        return file
+          ? `opsh_mail_snapshot=present:${file.mode}\n`
+          : "opsh_mail_snapshot=absent\n";
+      }
+      const chmod = /chmod ([0-7]{3,4}) '([^']+)'/.exec(cmd);
+      if (chmod && Object.values(dovecotFiles).includes(chmod[2] as never)) {
+        const file = files.get(chmod[2] as keyof typeof original);
+        if (file) file.mode = chmod[1];
+      }
+      const remove = /rm -f '([^']+)'/.exec(cmd);
+      if (remove && Object.values(dovecotFiles).includes(remove[1] as never)) {
+        files.delete(remove[1] as keyof typeof original);
+      }
+      return "";
+    });
+    const readFile = vi.fn(async (path: string) => {
+      const file = files.get(path as keyof typeof original);
+      if (!file) throw new Error("ENOENT");
+      return file.content;
+    });
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      if (!Object.values(dovecotFiles).includes(path as never)) return;
+      publishedBeforeMode = true;
+      const previous = files.get(path as keyof typeof original);
+      files.set(path as keyof typeof original, { content, mode: previous?.mode ?? "600" });
+    });
+    const writeFileWithMode = vi.fn(async (path: string, content: string, mode: number) => {
+      if (!Object.values(dovecotFiles).includes(path as never)) return;
+      files.set(path as keyof typeof original, { content, mode: mode.toString(8) });
+    });
+    return {
+      executor: { exec, streamExec, readFile, writeFile, writeFileWithMode } as never,
+      files,
+      exactOriginal,
+      launches: () => launches,
+      publishedBeforeMode: () => publishedBeforeMode,
+    };
+  }
+
+  it("restores exact persistent Dovecot files before retrying the old image after doveconf fails", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const box = rollbackDovecotExecutor(
+      {
+        [dovecotFiles.main]: { content: "auth_mechanisms = plain login\n", mode: "640" },
+        [dovecotFiles.oauth2]: { content: "old oauth2 config\n", mode: "600" },
+      },
+      (files) => {
+        files.set(dovecotFiles.main, {
+          content: "auth_mechanisms = plain login OAUTHBEARER XOAUTH2\n",
+          mode: "644",
+        });
+        files.set(dovecotFiles.managed, { content: "new managed config\n", mode: "640" });
+        files.set(dovecotFiles.oauth2, { content: "new oauth2 config\n", mode: "640" });
+      },
+    );
+
+    const result = await ensureContainerMail(box.executor, {
+      domain: "example.com",
+      secrets: {},
+      onLog: () => {},
+    });
+
+    expect(box.launches()).toBe(2);
+    expect(result).toMatchObject({ updated: false, mailDown: false });
+    expect(box.exactOriginal()).toBe(true);
+    expect(box.publishedBeforeMode()).toBe(false);
+  });
+
+  it("restores files removed by a failed OAuth-disable reconciliation before rollback", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const box = rollbackDovecotExecutor(
+      {
+        [dovecotFiles.main]: {
+          content: "auth_mechanisms = plain login OAUTHBEARER XOAUTH2\n",
+          mode: "644",
+        },
+        [dovecotFiles.managed]: { content: "active oauth config\n", mode: "640" },
+        [dovecotFiles.oauth2]: { content: "active oauth2 config\n", mode: "440" },
+      },
+      (files) => {
+        files.set(dovecotFiles.main, {
+          content: "auth_mechanisms = plain login\n",
+          mode: "600",
+        });
+        files.delete(dovecotFiles.managed);
+        files.delete(dovecotFiles.oauth2);
+      },
+    );
+
+    const result = await ensureContainerMail(box.executor, {
+      domain: "example.com",
+      secrets: {},
+      onLog: () => {},
+    });
+
+    expect(box.launches()).toBe(2);
+    expect(result).toMatchObject({ updated: false, mailDown: false });
+    expect(box.exactOriginal()).toBe(true);
+    expect(box.publishedBeforeMode()).toBe(false);
   });
 });
 
@@ -487,6 +769,7 @@ function nonRootSudoBox(
     if (command.includes(STATE_PROBE)) {
       return opts.runningImage ? stateLine(opts.runningImage) : "";
     }
+    if (command.includes("opsh_mail_snapshot=")) return "opsh_mail_snapshot=absent\n";
     if (command.includes("docker version")) return "27.0.0\n";
     if (command.includes("docker image inspect")) return opts.imagePresent ? "sha256:abc\n" : "";
     if (command.includes("/proc/net/tcp")) return PROC_LISTENING;

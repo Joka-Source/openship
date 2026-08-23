@@ -392,6 +392,20 @@ const envSchema = z.object({
    */
   MAIL_WEBMAIL_ADMIN_TOKEN: z.string().optional(),
 
+  /**
+   * Dedicated confidential client used only by the mail engine to introspect
+   * webmail access tokens. The secret is optional for generic password-only
+   * installs; when present, all three values are forwarded through the protected
+   * engine env-file and never placed on a command line.
+   */
+  JTYID_DOVECOT_INTROSPECTION_CLIENT_ID: z.string().default("openship-mail-dovecot"),
+  JTYID_DOVECOT_INTROSPECTION_SECRET: z.string().min(1).optional(),
+  JTYID_DOVECOT_INTROSPECTION_URL: z
+    .string()
+    .url()
+    .refine((value) => new URL(value).protocol === "https:", "must use HTTPS")
+    .default("https://id.jjty.in/application/o/introspect/"),
+
   /** Enables verbose timing logs for SSH/system checks and environment detection */
   SYSTEM_DEBUG_LOGS: envBool(),
 

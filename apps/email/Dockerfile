@@ -51,6 +51,12 @@ COPY apps/email/engine /opt/iRedMail-engine
 # Baked build config + supervisord programs + first-boot entrypoint.
 COPY apps/email/docker/ /opt/openship-mail/
 
+# Source-level contract for both the currently-built Dovecot 2.3 path and the
+# 2.4 generator variants. Runtime doveconf validation below checks the installed
+# 2.3 artifact; this catches future template/generator drift before installation.
+RUN bash /opt/openship-mail/verify-dovecot-oauth-config.sh \
+      /opt/iRedMail-engine /opt/openship-mail
+
 # Run the iRedMail installer at BUILD time to lay down the Postfix/Dovecot/Amavis/
 # ClamAV/SpamAssassin/iRedAPD configs. The build config points the SQL backend at
 # 127.0.0.1 (the runtime sidecar) and carries placeholder secrets that the
@@ -149,7 +155,9 @@ RUN mkdir -p /opt/openship-mail/seed \
     && cp -a /etc/postfix       /opt/openship-mail/seed/postfix      2>/dev/null || true \
     && cp -a /etc/dovecot       /opt/openship-mail/seed/dovecot      2>/dev/null || true \
     && cp -a /etc/amavis/conf.d /opt/openship-mail/seed/amavis-confd 2>/dev/null || true \
-    && chmod +x /opt/openship-mail/entrypoint.sh
+    && chmod +x /opt/openship-mail/entrypoint.sh \
+                /opt/openship-mail/configure-dovecot-jtyid-oauth.sh \
+                /opt/openship-mail/verify-dovecot-oauth-config.sh
 
 # ClamAV signatures, fetched into the SEED dir (issue #565).
 #

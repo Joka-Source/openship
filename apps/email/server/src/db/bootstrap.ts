@@ -30,6 +30,13 @@ const STATEMENTS = [
     email TEXT NOT NULL,
     name TEXT,
     encrypted_password BLOB NOT NULL,
+    auth_mode TEXT NOT NULL DEFAULT 'password',
+    jtyid TEXT,
+    provider_subject TEXT,
+    authenticated_at INTEGER,
+    encrypted_access_token BLOB,
+    encrypted_refresh_token BLOB,
+    access_token_expires_at INTEGER,
     imap_host TEXT NOT NULL,
     imap_port INTEGER NOT NULL,
     smtp_host TEXT NOT NULL,
@@ -79,5 +86,22 @@ const STATEMENTS = [
 export function bootstrapSchema(sqlite: Database): void {
   for (const sql of STATEMENTS) {
     sqlite.exec(sql);
+  }
+  const columns = new Set(
+    (sqlite.query('PRAGMA table_info(session)').all() as Array<{ name: string }>).map(
+      (column) => column.name,
+    ),
+  );
+  const additions: Array<[string, string]> = [
+    ['auth_mode', `ALTER TABLE session ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'password'`],
+    ['jtyid', 'ALTER TABLE session ADD COLUMN jtyid TEXT'],
+    ['provider_subject', 'ALTER TABLE session ADD COLUMN provider_subject TEXT'],
+    ['authenticated_at', 'ALTER TABLE session ADD COLUMN authenticated_at INTEGER'],
+    ['encrypted_access_token', 'ALTER TABLE session ADD COLUMN encrypted_access_token BLOB'],
+    ['encrypted_refresh_token', 'ALTER TABLE session ADD COLUMN encrypted_refresh_token BLOB'],
+    ['access_token_expires_at', 'ALTER TABLE session ADD COLUMN access_token_expires_at INTEGER'],
+  ];
+  for (const [column, sql] of additions) {
+    if (!columns.has(column)) sqlite.exec(sql);
   }
 }

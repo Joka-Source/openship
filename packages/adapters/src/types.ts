@@ -798,6 +798,12 @@ export interface CommandExecutor extends ExecOnly {
   /** Write content to a file on the target machine. Creates dirs as needed. */
   writeFile(path: string, content: string): Promise<void>;
 
+  /**
+   * Atomically publish content with its restrictive mode already applied.
+   * Optional for legacy/custom executors; callers use the system-layer fallback.
+   */
+  writeFileWithMode?(path: string, content: string, mode: number): Promise<void>;
+
   /** Read a file from the target machine. */
   readFile(path: string): Promise<string>;
 

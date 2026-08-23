@@ -64,6 +64,21 @@ describe("webmail catalog contract", () => {
     }
   });
 
+  it("declares the confidential JTYID client secret as runtime-only configuration", () => {
+    const configKeys = new Map((template?.configFields ?? []).map((field) => [field.key, field]));
+    const field = configKeys.get("JTYID_OIDC_CLIENT_SECRET");
+
+    expect(field).toBeDefined();
+    expect(field?.secret).toBe(true);
+    expect(field?.generate).toBeUndefined();
+  });
+
+  it("derives the OIDC callback origin from the routed public URL", () => {
+    const service = template?.services?.find((candidate) => candidate.name === "webmail");
+
+    expect(service?.environment?.PUBLIC_URL).toBe("{{publicUrl:webmail}}");
+  });
+
   it("keeps both secrets un-inlined, so a missing one can be minted later", () => {
     // `ensureGeneratedAppSecrets` refuses to mint a key the template substitutes into
     // some other string, because those copies were written once and would contradict a
