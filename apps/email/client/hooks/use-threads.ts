@@ -5,6 +5,7 @@ import { useSearchValue } from '@/hooks/use-search-value';
 import { useTRPC } from '@/providers/query-provider';
 import useSearchLabels from './use-labels-search';
 import { useSession } from '@/lib/auth-client';
+import { mailContentQueryKey } from '@/lib/mail-content-cache';
 import { useAtom, useAtomValue } from 'jotai';
 import { useSettings } from './use-settings';
 import { useParams } from 'react-router';
@@ -179,12 +180,7 @@ export const useThread = (threadId: string | null, options?: { enabled?: boolean
 
   // Prefetch query - intentionally unused, just for caching
   useQuery({
-    queryKey: [
-      'email-content',
-      latestMessage?.id,
-      shouldLoadImages,
-      systemTheme,
-    ],
+    queryKey: mailContentQueryKey(latestMessage?.id, shouldLoadImages, systemTheme),
     queryFn: async () => {
       if (!latestMessage?.decodedBody || !settings?.settings) return null;
 

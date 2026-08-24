@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { defaultUserSettings } from '@zero/server/schemas';
 import { useTRPC } from '@/providers/query-provider';
 import { getBrowserTimezone } from '@/lib/timezones';
+import { mailContentQueryKey } from '@/lib/mail-content-cache';
 import { useSettings } from '@/hooks/use-settings';
 import { m } from '@/paraglide/messages';
 import { useTheme } from 'next-themes';
@@ -69,7 +70,7 @@ export function MailContent({ id, html, senderEmail }: MailContentProps) {
   );
 
   const { data: processedData } = useQuery({
-    queryKey: ['email-content', id, isTrustedSender || temporaryImagesEnabled, resolvedTheme],
+    queryKey: mailContentQueryKey(id, isTrustedSender || temporaryImagesEnabled, resolvedTheme),
     queryFn: async () => {
       const result = await processEmailContent({
         html,

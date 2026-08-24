@@ -9,6 +9,7 @@ import { createTRPCClient, httpBatchLink } from '@trpc/client';
 import { useMemo, type PropsWithChildren } from 'react';
 import type { AppRouter } from '@zero/server/trpc';
 import { CACHE_BURST_KEY } from '@/lib/constants';
+import { shouldPersistQueryKey } from '@/lib/mail-content-cache';
 import { signOut } from '@/lib/auth-client';
 import { get, set, del } from 'idb-keyval';
 import superjson from 'superjson';
@@ -127,19 +128,12 @@ export function QueryProvider({
         persister,
         buster: CACHE_BURST_KEY,
         maxAge: 1000 * 60 * 60 * 24, // 24 hours
-        // Never persist mail/draft state - IDB write is debounced, so a
-        // mark-as-read followed by a quick refresh could restore the old
-        // unread badge until the background refetch landed (or lose the
-        // update entirely if IDB hadn't synced yet). Settings, labels,
-        // and connection data are slow-changing and safe to persist.
+        // Never persist mail/draft state or processed message HTML. IDB
+        // otherwise restores stale flags and sanitizer/rendering output after
+        // refreshes and deployments. Settings, labels, and connection data are
+        // slow-changing and safe to persist.
         dehydrateOptions: {
-          shouldDehydrateQuery: (query) => {
-            const head = query.queryKey?.[0];
-            const path = Array.isArray(head) ? head : [];
-            const root = typeof path[0] === 'string' ? path[0] : '';
-            if (root === 'mail' || root === 'drafts') return false;
-            return true;
-          },
+          shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),
         },
       }}
       onSuccess={() => {
