@@ -47,11 +47,12 @@ describe('sanitizeMailHtml', () => {
       });
     }
 
-    it('drops <style> blocks entirely rather than emitting their contents', () => {
+    it('keeps safe embedded mail CSS scoped to the message body', () => {
       const out = sanitizeMailHtml('<style>div{color:red}</style><p>body</p>');
 
-      expect(out).not.toContain('color:red');
-      expect(out).not.toMatch(/<style/i);
+      expect(out).toContain('<style>');
+      expect(out).toContain('[data-mail-content-fit] div');
+      expect(out).toContain('color:red');
       expect(out).toContain('body');
     });
   });
@@ -77,9 +78,55 @@ describe('sanitizeMailHtml', () => {
         assertInert(sanitizeMailHtml(vector));
       });
     }
+
+    it('does not let embedded CSS target the viewer host', () => {
+      const out = sanitizeMailHtml(
+        '<style>:host{display:none}:h\\6fst{color:red}.safe{color:blue}</style><div class="safe">x</div>',
+      );
+
+      expect(out).not.toContain(':host');
+      expect(out).not.toContain('display:none');
+      expect(out).toContain('[data-mail-content-fit] .safe');
+      expect(out).toContain('color:blue');
+    });
+
+    it('removes layout-escape properties from inline styles too', () => {
+      const out = sanitizeMailHtml(
+        '<div style="position:fixed;inset:0;z-index:9999;color:#333">x</div>',
+      );
+
+      expect(out).not.toContain('position');
+      expect(out).not.toContain('inset');
+      expect(out).not.toContain('z-index');
+      expect(out).toContain('color:#333');
+    });
   });
 
   describe('legitimate mail content survives', () => {
+    it('preserves the embedded sizing rule used by Authentik mail', () => {
+      const out = sanitizeMailHtml(
+        '<style>img.logo { max-width: 100%; max-height: 35px; }</style><img class="logo" src="cid:logo">',
+      );
+
+      expect(out).toContain('[data-mail-content-fit] img.logo');
+      expect(out).toContain('max-width: 100%');
+      expect(out).toContain('max-height: 35px');
+    });
+
+    it('keeps safe responsive rules while removing layout-escape declarations', () => {
+      const out = sanitizeMailHtml(
+        '<style>@media (max-width:600px){.card{display:block;position:fixed;inset:0;z-index:9999;color:#333}}</style><div class="card">x</div>',
+      );
+
+      expect(out).toContain('@media (max-width:600px)');
+      expect(out).toContain('[data-mail-content-fit] .card');
+      expect(out).toContain('display:block');
+      expect(out).toContain('color:#333');
+      expect(out).not.toContain('position:fixed');
+      expect(out).not.toContain('inset:0');
+      expect(out).not.toContain('z-index');
+    });
+
     it('keeps text, headings and inline styles', () => {
       const out = sanitizeMailHtml(
         '<h1>Title</h1><p style="color:#333">Hello <strong>you</strong></p>',
@@ -107,7 +154,11 @@ describe('sanitizeMailHtml', () => {
   // href is navigable markup.
   describe('link schemes', () => {
     it('keeps http, https and mailto hrefs', () => {
-      for (const href of ['https://example.com/a', 'http://example.com/a', 'mailto:x@example.com']) {
+      for (const href of [
+        'https://example.com/a',
+        'http://example.com/a',
+        'mailto:x@example.com',
+      ]) {
         expect(sanitizeMailHtml(`<a href="${href}">x</a>`)).toContain(href);
       }
     });
@@ -128,7 +179,9 @@ describe('sanitizeMailHtml', () => {
   });
 
   it('is stable under repeated sanitization', () => {
-    const once = sanitizeMailHtml('<p>hi</p><style></style/><img src=x onerror=alert(1)></style>');
+    const once = sanitizeMailHtml(
+      '<style>img.logo{max-width:100%;position:fixed}</style><p>hi</p><img class="logo" src="cid:logo">',
+    );
 
     expect(sanitizeMailHtml(once)).toBe(once);
   });
@@ -207,14 +260,29 @@ describe('blockRemoteImages', () => {
     expect(blockRemoteImages('<p>plain text</p>').blocked).toBe(false);
   });
 
-  // The <style>-block leaks from the advisory (@import, background url())
-  // are gone because sanitizeMailHtml no longer emits <style> at all.
-  it('drops <style>-based trackers upstream in the sanitizer', () => {
-    for (const payload of [
-      '<style>div{background-image:url(https://tracker.tld/px.gif)}</style>',
-      '<style>@import url(https://tracker.tld/x.css)</style>',
-    ]) {
-      expect(sanitizeMailHtml(payload)).not.toContain('tracker.tld');
-    }
+  it('blocks remote CSS resources inside embedded styles', () => {
+    const sanitized = sanitizeMailHtml(
+      '<style>.card{color:red;background-image:url(https://tracker.tld/px.gif)}</style><div class="card">x</div>',
+    );
+    const { html, blocked } = blockRemoteImages(sanitized);
+
+    expect(blocked).toBe(true);
+    expect(html).not.toContain('tracker.tld');
+    expect(html).toContain('color:red');
+  });
+
+  it('drops escaped CSS URL evasions before rendering', () => {
+    const sanitized = sanitizeMailHtml(
+      '<style>.card{color:red;background-image:u\\72l(https://tracker.tld/px.gif)}</style><div class="card">x</div>',
+    );
+
+    expect(sanitized).not.toContain('tracker.tld');
+    expect(sanitized).toContain('color:red');
+  });
+
+  it('always drops external stylesheet imports', () => {
+    expect(
+      sanitizeMailHtml('<style>@import url(https://tracker.tld/x.css); div{color:red}</style>'),
+    ).not.toContain('tracker.tld');
   });
 });

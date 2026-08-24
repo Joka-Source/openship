@@ -9,6 +9,8 @@ import { useTheme } from 'next-themes';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
+import { fitMailContentToWidth } from './mail-content-fit';
+
 interface MailContentProps {
   id: string;
   html: string;
@@ -103,15 +105,63 @@ export function MailContent({ id, html, senderEmail }: MailContentProps) {
   useEffect(() => {
     if (!shadowRootRef.current || !processedData) return;
 
-    // The shadow root is style-isolated from the document - global font
-    // CSS doesn't reach it for unstyled elements. Prepend a single
-    // <style> block that applies the openship sans stack (Gellix +
-    // SF Arabic fallback) to the rendered email body. `@font-face`
-    // declarations in the outer document remain accessible per spec,
-    // so we only need to set font-family inside the shadow tree.
-    shadowRootRef.current.innerHTML =
-      `<style>:host, :host * { font-family: 'Gellix', 'SF Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; }</style>` +
-      processedData.html;
+    const root = shadowRootRef.current;
+    const host = hostRef.current;
+    if (!host) return;
+
+    // Email HTML is isolated in a shadow tree, so outer application styles cannot
+    // keep fixed-width sender layouts inside the reading pane. Preserve the
+    // authored layout, then scale only messages whose measured width overflows.
+    root.innerHTML = `<style>
+      :host, :host * {
+        box-sizing: border-box;
+        font-family: 'Gellix', 'SF Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      }
+      :host {
+        display: block;
+        max-width: 100%;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      img, video, svg {
+        height: auto;
+        max-width: 100%;
+      }
+      pre {
+        max-width: 100%;
+        overflow-x: auto;
+        white-space: pre-wrap;
+      }
+      [data-mail-content-fit] {
+        min-width: 0;
+        transform-origin: top left;
+      }
+    </style><div data-mail-content-fit>${processedData.html}</div>`;
+
+    const content = root.querySelector<HTMLElement>('[data-mail-content-fit]');
+    if (!content) return;
+
+    let animationFrame = 0;
+
+    const fitContent = () => {
+      fitMailContentToWidth(host, content);
+    };
+
+    const scheduleFit = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(fitContent);
+    };
+
+    const resizeObserver = new ResizeObserver(scheduleFit);
+    resizeObserver.observe(host);
+    root.addEventListener('load', scheduleFit, true);
+    fitContent();
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      resizeObserver.disconnect();
+      root.removeEventListener('load', scheduleFit, true);
+    };
   }, [processedData]);
 
   const handleImageError = useCallback(
@@ -189,7 +239,12 @@ export function MailContent({ id, html, senderEmail }: MailContentProps) {
           </button>
         </div>
       )}
-      <div ref={hostRef} className={cn('mail-content w-full flex-1 overflow-scroll no-scrollbar px-4 text-black dark:text-white')} />
+      <div
+        ref={hostRef}
+        className={cn(
+          'mail-content no-scrollbar w-full flex-1 overflow-x-hidden px-4 text-black dark:text-white',
+        )}
+      />
     </>
   );
 }

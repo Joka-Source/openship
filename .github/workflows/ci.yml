@@ -97,7 +97,7 @@ jobs:
       - name: Run tests
         run: bun run test
 
-  # The webmail server's own suite, which nothing else runs.
+  # The webmail server and client suites, which nothing else runs.
   #
   # GH-220: apps/email/server/test/{sanitize,from-header,list-snippet}.test.ts had no
   # runner at all. They are `bun:test` files, and the root `test` script is
@@ -109,11 +109,11 @@ jobs:
   # the CSS url()/@import read-receipt leak (GHSA-3hcp-c4c7-6m8p) and asserts the read
   # pane stays inert. That is exactly the kind of test that must not rot.
   #
-  # Its own job rather than a turbo target: these need `bun test` (not vitest) and a
-  # separate install rooted in apps/email/server. Independent and parallel, so it cannot
-  # slow the jobs above.
-  webmail-server-test:
-    name: Test webmail server
+  # Its own job rather than a turbo target: these need `bun test` (not vitest) and
+  # separate installs rooted in apps/email/{server,client}. Independent and parallel,
+  # so it cannot slow the jobs above.
+  webmail-test:
+    name: Test webmail
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -128,7 +128,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-webmail-${{ hashFiles('apps/email/server/bun.lock') }}
+          key: ${{ runner.os }}-bun-webmail-${{ hashFiles('apps/email/server/bun.lock', 'apps/email/client/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-webmail-
             ${{ runner.os }}-bun-
@@ -142,4 +142,12 @@ jobs:
 
       - name: Run webmail server tests
         working-directory: apps/email/server
+        run: bun test
+
+      - name: Install webmail client dependencies
+        working-directory: apps/email/client
+        run: bun install
+
+      - name: Run webmail client tests
+        working-directory: apps/email/client
         run: bun test
